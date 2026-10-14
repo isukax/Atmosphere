@@ -1,0 +1,14 @@
+{
+  "name": "atmosphere",
+  "version-string": "0.1.0",
+  "description": "Real-time atmospheric scattering verification app (docs/design.md)",
+  "dependencies": [
+    "glm",
+    "nlohmann-json",
+    "tinyexr",
+    {
+      "name": "imgui",
+      "features": ["dx12-binding", "win32-binding"]
+    }
+  ]
+}

@@ -1,0 +1,9 @@
+build/
+out/
+dumps/
+reference/.venv/
+__pycache__/
+.pytest_cache/
+imgui.ini
+*.user
+.vs/
