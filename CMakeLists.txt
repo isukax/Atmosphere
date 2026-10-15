@@ -65,6 +65,10 @@ compile_shader(display/Display.hlsl PSMain ps_6_6 Display_ps)
 compile_shader(scene/TestPattern.hlsl CSMain cs_6_6 TestPattern_cs)
 compile_shader(atmosphere/TransmittanceLut.hlsl CSMain cs_6_6 TransmittanceLut_cs)
 compile_shader(atmosphere/SkyRaymarch.hlsl CSMain cs_6_6 SkyRaymarch_cs)
+compile_shader(atmosphere/MultiScatteringLut.hlsl CSMain cs_6_6 MultiScatteringLut_cs)
+compile_shader(atmosphere/SkyViewLut.hlsl CSMain cs_6_6 SkyViewLut_cs)
+compile_shader(atmosphere/SkyFromLut.hlsl CSMain cs_6_6 SkyFromLut_cs)
+compile_shader(atmosphere/PathTrace.hlsl CSMain cs_6_6 PathTrace_cs)
 
 add_custom_target(shaders DEPENDS ${SHADER_OUTPUTS} SOURCES ${SHADER_HEADERS})
 
@@ -77,6 +81,7 @@ add_executable(atmosphere
   src/app/Window.cpp
   src/atmosphere/AtmosphereParams.cpp
   src/atmosphere/AtmosphereRenderer.cpp
+  src/atmosphere/PathTracer.cpp
   src/gfx/Device.cpp
   src/gfx/Descriptors.cpp
   src/gfx/Pipeline.cpp
@@ -92,6 +97,7 @@ add_executable(atmosphere
   src/io/ExrWriter.cpp
   src/batch/Phase1Tests.cpp
   src/batch/Phase2Tests.cpp
+  src/batch/Phase3Tests.cpp
 )
 add_dependencies(atmosphere shaders)
 

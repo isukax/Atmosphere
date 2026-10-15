@@ -52,6 +52,33 @@ App::App(bool debugLayer)
     m_atmosphere = atmosphere::loadDefaultParams(coefficientPath);
     applyCoefficientSet(0);  // 先頭 = Hillaire2020（作業色空間の同期とログのため）
     m_atmosphereRenderer = std::make_unique<atmosphere::AtmosphereRenderer>(m_device, m_pipelines);
+    m_pathTracer = std::make_unique<atmosphere::PathTracer>(m_device, m_pipelines);
+    m_pathTracer->resize(m_sceneColor.desc().width, m_sceneColor.desc().height);
+}
+
+void App::resetPathTraceIfChanged()
+{
+    // [POINT] パストレースはフレームをまたいでサンプルを足して収束させるので、結果を変える入力
+    //         （大気・太陽・カメラ・設定）が 1 つでも変われば累積を捨てて数え直す。
+    //         入力をバイト列にして前フレームと比べる（露出は累積後に掛けるので含めない）。
+    std::vector<uint8_t> key;
+    auto append = [&key](const auto& value) {
+        const auto* bytes = reinterpret_cast<const uint8_t*>(&value);
+        key.insert(key.end(), bytes, bytes + sizeof(value));
+    };
+    append(atmosphere::toGpu(m_atmosphere));
+    append(m_atmosphere.sunDirection());
+    append(m_camera.positionM);
+    append(m_camera.yawRad);
+    append(m_camera.pitchRad);
+    append(m_camera.verticalFovRad);
+    append(m_pathTraceMaxDepth);
+    append(m_sceneColor.desc().width);
+    append(m_sceneColor.desc().height);
+    if (key != m_pathTraceKey) {
+        m_pathTraceKey = std::move(key);
+        m_pathTracer->reset();
+    }
 }
 
 void App::applyCoefficientSet(int index)
@@ -117,6 +144,9 @@ void App::createSizeDependentResources()
     //         （物理輝度のままだと太陽ディスク ~1.9×10⁹ cd/m² が FP16 の上限 65504 を超える）。
     m_sceneColor = gfx::Texture(m_device, {w, h, DXGI_FORMAT_R16G16B16A16_FLOAT, true, true, false, L"SceneColor"});
     m_uiTarget = gfx::Texture(m_device, {w, h, ui::ImGuiLayer::kUiFormat, true, false, true, L"UiTarget"});
+    if (m_pathTracer) {
+        m_pathTracer->resize(w, h);
+    }
 }
 
 void App::refreshDisplay()
@@ -232,17 +262,35 @@ void App::renderFrame()
     drawUi();
 
     // 1) シーン
-    if (m_sceneMode == SceneMode::Sky) {
-        // Transmittance LUT（媒質パラメータが変わったときだけ作り直す）→ 空の単散乱レイマーチ
-        m_atmosphereRenderer->updateTransmittanceLut(cmd, m_device.upload(), m_atmosphere, m_transmittanceSteps);
-        m_sceneColor.transition(cmd, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-        atmosphere::RaymarchView view;
+    if (isSkyMode()) {
+        atmosphere::SkyView view;
         const float aspect = static_cast<float>(w) / static_cast<float>(h);
         view.invViewProjRot = glm::inverse(m_camera.projection(aspect) * m_camera.viewRotation());
         view.cameraPosKm = atmosphere::worldToPlanetKm(m_atmosphere, m_camera.positionM);
         view.exposureScale = exposureScale();
-        m_atmosphereRenderer->renderSkyRaymarch(cmd, m_device.upload(), m_atmosphere, view, m_raymarch,
-                                                m_sceneColor.uavIndex(), w, h);
+        view.sunDisk = m_sunDisk;
+        // [POINT] LUT の更新順: Transmittance（媒質が変わったとき）→ Multi-scattering（同）→ Sky-View（毎フレーム）。
+        //         後の LUT は前の LUT を読む。
+        m_atmosphereRenderer->updateLuts(cmd, m_device.upload(), m_atmosphere, m_quality, view.cameraPosKm);
+        m_sceneColor.transition(cmd, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        switch (m_sceneMode) {
+        case SceneMode::SkyLut:
+            m_atmosphereRenderer->renderSkyFromLut(cmd, m_device.upload(), m_atmosphere, view,
+                                                   m_sceneColor.uavIndex(), w, h);
+            break;
+        case SceneMode::SkyRaymarch: {
+            atmosphere::RaymarchSettings settings = m_raymarch;
+            settings.multipleScattering = m_quality.multipleScattering;
+            m_atmosphereRenderer->renderSkyRaymarch(cmd, m_device.upload(), m_atmosphere, view, settings,
+                                                    m_sceneColor.uavIndex(), w, h);
+            break;
+        }
+        default:
+            resetPathTraceIfChanged();
+            m_pathTracer->render(cmd, m_device.upload(), *m_atmosphereRenderer, m_atmosphere, view,
+                                 m_pathTraceMaxDepth, m_pathTraceSamplesPerFrame, m_sceneColor.uavIndex());
+            break;
+        }
     } else {
         m_sceneColor.transition(cmd, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         m_testPattern.record(cmd, m_device.upload(), m_sceneColor.uavIndex(), w, h, exposureScale(), m_workingSpace,
@@ -297,11 +345,12 @@ void App::drawUi()
 {
     ImGui::SetNextWindowPos(ImVec2(10, 10), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowSize(ImVec2(440, 0), ImGuiCond_FirstUseEver);
-    ImGui::Begin("Atmosphere - Phase 2");
+    ImGui::Begin("Atmosphere - Phase 3");
     int sceneMode = static_cast<int>(m_sceneMode);
-    if (ImGui::Combo("Scene", &sceneMode, "Test pattern\0Sky (single scattering raymarch)\0")) {
+    if (ImGui::Combo("Scene", &sceneMode,
+                     "Test pattern\0Sky: LUT (Hillaire 2020)\0Sky: raymarch reference\0Sky: path trace\0")) {
         m_sceneMode = static_cast<SceneMode>(sceneMode);
-        if (m_sceneMode == SceneMode::Sky) {
+        if (isSkyMode()) {
             m_workingSpace = m_atmosphere.workingSpace;
         }
     }
@@ -335,7 +384,7 @@ void App::drawUi()
         ImGui::Text("k = 1/(1.2*2^EV100) = %.3e /(cd/m2)", exposureScale());
         ImGui::Text("fb 1.0 (= 100 nit on display) <- %.4g cd/m2 in scene", 1.0f / exposureScale());
         // 空の表示中は作業色空間を係数セットに従わせる（Atmosphere セクションで選ぶ）
-        ImGui::BeginDisabled(m_sceneMode == SceneMode::Sky);
+        ImGui::BeginDisabled(isSkyMode());
         int space = static_cast<int>(m_workingSpace);
         if (ImGui::Combo("Working space", &space, "Rec.709\0Rec.2020\0")) {
             m_workingSpace = static_cast<display::WorkingColorSpace>(space);
@@ -347,7 +396,7 @@ void App::drawUi()
         }
     }
 
-    if (m_sceneMode == SceneMode::Sky) {
+    if (isSkyMode()) {
         drawAtmosphereUi();
     }
 
@@ -426,23 +475,40 @@ void App::drawAtmosphereUi()
             m_atmosphere.sunIlluminanceLux = m_solarIlluminanceFromSpectrumLux;
         }
 
+        ImGui::Checkbox("Sun disk", &m_sunDisk);
+        ImGui::SliderFloat3("Ground albedo", &m_atmosphere.groundAlbedo.x, 0.0f, 1.0f, "%.2f");
+
         ImGui::SeparatorText("Quality");
-        int lutSteps = static_cast<int>(m_transmittanceSteps);
-        if (ImGui::SliderInt("Transmittance LUT steps", &lutSteps, 4, 1000, "%d", ImGuiSliderFlags_Logarithmic)) {
-            m_transmittanceSteps = static_cast<uint32_t>(lutSteps);
+        ImGui::Checkbox("Multiple scattering", &m_quality.multipleScattering);
+        auto sliderSteps = [](const char* label, uint32_t& value, int minValue, int maxValue) {
+            int v = static_cast<int>(value);
+            if (ImGui::SliderInt(label, &v, minValue, maxValue, "%d", ImGuiSliderFlags_Logarithmic)) {
+                value = static_cast<uint32_t>(v);
+            }
+        };
+        sliderSteps("Transmittance LUT steps", m_quality.transmittanceSteps, 4, 1000);
+        sliderSteps("Multi-scattering LUT steps", m_quality.multiScatteringSteps, 4, 256);
+        ImGui::Checkbox("Multi-scattering LUT: uniform steps", &m_quality.multiScatteringUniformSteps);
+        if (m_sceneMode == SceneMode::SkyLut) {
+            sliderSteps("Sky-View LUT steps", m_quality.skyViewSteps, 4, 256);
         }
-        int primary = static_cast<int>(m_raymarch.primarySteps);
-        if (ImGui::SliderInt("View ray steps", &primary, 4, 512, "%d", ImGuiSliderFlags_Logarithmic)) {
-            m_raymarch.primarySteps = static_cast<uint32_t>(primary);
+        if (m_sceneMode == SceneMode::SkyRaymarch) {
+            sliderSteps("View ray steps", m_raymarch.primarySteps, 4, 1024);
+            int sunMode = static_cast<int>(m_raymarch.sunMode);
+            if (ImGui::Combo("Sun transmittance", &sunMode, "Transmittance LUT\0Nested raymarch (reference)\0")) {
+                m_raymarch.sunMode = static_cast<atmosphere::SunTransmittanceMode>(sunMode);
+            }
+            if (m_raymarch.sunMode == atmosphere::SunTransmittanceMode::Nested) {
+                sliderSteps("Nested steps", m_raymarch.nestedSteps, 4, 256);
+            }
         }
-        int sunMode = static_cast<int>(m_raymarch.sunMode);
-        if (ImGui::Combo("Sun transmittance", &sunMode, "Transmittance LUT\0Nested raymarch (reference)\0")) {
-            m_raymarch.sunMode = static_cast<atmosphere::SunTransmittanceMode>(sunMode);
-        }
-        if (m_raymarch.sunMode == atmosphere::SunTransmittanceMode::Nested) {
-            int nested = static_cast<int>(m_raymarch.nestedSteps);
-            if (ImGui::SliderInt("Nested steps", &nested, 4, 256, "%d", ImGuiSliderFlags_Logarithmic)) {
-                m_raymarch.nestedSteps = static_cast<uint32_t>(nested);
+        if (m_sceneMode == SceneMode::SkyPathTrace) {
+            sliderSteps("Max scattering depth", m_pathTraceMaxDepth, 1, 128);
+            sliderSteps("Samples / frame", m_pathTraceSamplesPerFrame, 1, 64);
+            ImGui::Text("Accumulated: %llu spp per channel",
+                        static_cast<unsigned long long>(m_pathTracer->samplesPerChannel()));
+            if (ImGui::SmallButton("Restart")) {
+                m_pathTracer->reset();
             }
         }
 
@@ -451,6 +517,16 @@ void App::drawAtmosphereUi()
         const gfx::Texture& lut = m_atmosphereRenderer->transmittanceLut();
         ImGui::Image(static_cast<ImTextureID>(m_device.bindless().gpu(lut.srvIndex()).ptr), ImVec2(384.0f, 96.0f));
         ImGui::TextDisabled("x: view zenith (left: up, right: horizon), y: altitude (top: ground)");
+        ImGui::SeparatorText("Multi-scattering LUT (32x32), Sky-View LUT (192x108)");
+        const gfx::Texture& ms = m_atmosphereRenderer->multiScatteringLut();
+        const gfx::Texture& sv = m_atmosphereRenderer->skyViewLut();
+        ImGui::Image(static_cast<ImTextureID>(m_device.bindless().gpu(ms.srvIndex()).ptr), ImVec2(96.0f, 96.0f));
+        ImGui::SameLine();
+        ImGui::Image(static_cast<ImTextureID>(m_device.bindless().gpu(sv.srvIndex()).ptr), ImVec2(192.0f, 108.0f));
+        ImGui::TextDisabled("MS: x = cos(sun zenith) -1..1, y = altitude. Sky-View: x = azimuth from sun, y = zenith");
+        const gfx::Texture& svMie = m_atmosphereRenderer->skyViewMieLut();
+        ImGui::Image(static_cast<ImTextureID>(m_device.bindless().gpu(svMie.srvIndex()).ptr), ImVec2(192.0f, 108.0f));
+        ImGui::TextDisabled("Sky-View Mie LUT (single scattering without phase, x p_M per pixel)");
     }
 }
 

@@ -3,7 +3,10 @@
 #ifndef PHASE_HLSLI
 #define PHASE_HLSLI
 
-static const float kPi = 3.14159265358979;
+#include "common/Math.hlsli"
+
+// 等方位相関数 1/(4π)。多重散乱の近似（2 次以降の散乱は等方的とみなす）で使う。
+static const float kIsotropicPhase = 1.0 / (4.0 * kPi);
 
 // Rayleigh: 3/(16π)·(1 + cos²θ)
 float RayleighPhase(float cosTheta)

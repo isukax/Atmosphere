@@ -4,9 +4,11 @@
 //   atmosphere.exe [--debug]                      対話モード
 //   atmosphere.exe --test <name> --out <dir>      バッチ検証（Python の reference/validate_phase*.py から起動）
 //     Phase 1: gt7, pq   Phase 2: transmittance, single_scattering
+//     Phase 3: multiscattering, sky_lut, sun_closeup, pathtrace, spectral
 #include "app/App.h"
 #include "batch/Phase1Tests.h"
 #include "batch/Phase2Tests.h"
+#include "batch/Phase3Tests.h"
 
 #include <iostream>
 #include <string>
@@ -37,7 +39,10 @@ int main(int argc, char** argv)
             if (test == "gt7" || test == "pq") {
                 return batch::runPhase1Test(device, pipelines, test, outDir);
             }
-            return batch::runPhase2Test(device, pipelines, test, outDir);
+            if (test == "transmittance" || test == "single_scattering") {
+                return batch::runPhase2Test(device, pipelines, test, outDir);
+            }
+            return batch::runPhase3Test(device, pipelines, test, outDir);
         }
         app::App application(debugLayer);
         return application.run();

@@ -50,6 +50,29 @@ class Atmosphere:
             ozone_half_width_km=float(a["ozone_half_width_km"]),
         )
 
+    @classmethod
+    def spectral(cls, meta: dict, wavelengths_nm: np.ndarray) -> "Atmosphere":
+        """幾何・スケールハイト・位相関数はサイドカーの値、係数は分光データ（チャンネル = 波長）で作る（V9 用）。"""
+
+        import spectral_data as sd
+
+        a = meta["atmosphere"]
+        wl = np.asarray(wavelengths_nm, dtype=np.float64)
+        mie_extinction = np.full(wl.shape, sd.mie_extinction_per_km())
+        return cls(
+            bottom_radius_km=float(a["bottom_radius_km"]),
+            top_radius_km=float(a["top_radius_km"]),
+            rayleigh_scattering_per_km=sd.rayleigh_scattering_per_km(wl),
+            rayleigh_scale_height_km=float(a["rayleigh_scale_height_km"]),
+            mie_scattering_per_km=mie_extinction * sd.MIE_SINGLE_SCATTERING_ALBEDO,
+            mie_extinction_per_km=mie_extinction,
+            mie_scale_height_km=float(a["mie_scale_height_km"]),
+            mie_phase_g=float(a["mie_phase_g"]),
+            ozone_absorption_per_km=sd.ozone_absorption_per_km(wl),
+            ozone_center_km=float(a["ozone_center_km"]),
+            ozone_half_width_km=float(a["ozone_half_width_km"]),
+        )
+
     # ------------------------------------------------------------------ 媒質
     def densities(self, altitude_km: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         h = np.asarray(altitude_km, dtype=np.float64)
@@ -128,32 +151,73 @@ class Atmosphere:
             mu = np.where(d == 0.0, 1.0, (big_h * big_h - rho * rho - d * d) / (2.0 * r * d))
         return r, np.clip(mu, -1.0, 1.0)
 
-    # ------------------------------------------------------------------ 単散乱
+    # ------------------------------------------------------------------ 視線に沿った散乱の積分
+    @property
+    def channel_count(self) -> int:
+        """係数のチャンネル数（RGB なら 3、分光なら波長の数）。"""
+
+        return int(np.asarray(self.rayleigh_scattering_per_km).size)
+
     def single_scattering_per_lux(self, camera_km: np.ndarray, directions: np.ndarray, sun_dir: np.ndarray,
                                   outer_panels: int = 32, inner_panels: int = 8, order: int = 4,
                                   chunk: int = 8) -> np.ndarray:
-        """単位照度あたりの単散乱輝度 [sr⁻¹]、形状 (N, 3)。太陽は点光源、惑星の影あり、地表反射なし。"""
+        """単位照度あたりの単散乱輝度 [sr⁻¹]、形状 (N, C)。太陽は点光源、惑星の影あり、地表反射なし。"""
+
+        return self.scattering_integrals(camera_km, directions, sun_dir, outer_panels=outer_panels,
+                                         inner_panels=inner_panels, order=order, chunk=chunk)[0]
+
+    def multiple_scattering_psi(self, r_km: float, mu_sun: float, ground_albedo, outer_panels: int = 32,
+                                inner_panels: int = 8, order: int = 4) -> np.ndarray:
+        """Multi-scattering LUT の値 Ψ_ms [sr⁻¹]（シェーダーの MultiScatteringLut.hlsl と同じ 64 方向・同じ式）。"""
+
+        k = np.arange(64)
+        a = (k % 8 + 0.5) / 8.0
+        b = (k // 8 + 0.5) / 8.0
+        theta = 2.0 * np.pi * a
+        phi = np.arccos(1.0 - 2.0 * b)
+        dirs = np.stack([np.sin(phi) * np.cos(theta), np.cos(phi), np.sin(phi) * np.sin(theta)], axis=1)
+        origin = np.array([0.0, r_km, 0.0])
+        sun = np.array([np.sqrt(max(0.0, 1.0 - mu_sun * mu_sun)), mu_sun, 0.0])
+        lum, ms1 = self.scattering_integrals(origin, dirs, sun, isotropic=True, ground_albedo=ground_albedo,
+                                             outer_panels=outer_panels, inner_panels=inner_panels, order=order)
+        second_order = lum.mean(axis=0)   # Σ L·(4π/N)·(1/(4π))
+        fms = ms1.mean(axis=0)
+        return second_order / (1.0 - fms)  # Ψ_ms = L₂ / (1 − f_ms)
+
+    def scattering_integrals(self, camera_km: np.ndarray, directions: np.ndarray, sun_dir: np.ndarray,
+                             isotropic: bool = False, ground_albedo=None, outer_panels: int = 32,
+                             inner_panels: int = 8, order: int = 4, chunk: int = 8):
+        """視線ごとの積分 (L, F)、形状 (N, C)。
+          L = ∫ T_view·Σ σs·p·T_sun dt（+ 地表の反射）… 単位照度あたりの輝度 [sr⁻¹]
+          F = ∫ T_view·σs dt                         … f_ms の被積分量（Multi-scattering LUT 用）
+        isotropic: 位相関数を 1/(4π) にする。ground_albedo: 地表のランバート反射を加える（None なら加えない）。"""
 
         directions = np.asarray(directions, dtype=np.float64).reshape(-1, 3)
-        directions /= np.linalg.norm(directions, axis=1, keepdims=True)
+        directions = directions / np.linalg.norm(directions, axis=1, keepdims=True)
         camera_km = np.asarray(camera_km, dtype=np.float64)
         sun_dir = np.asarray(sun_dir, dtype=np.float64)
-        out = np.zeros((directions.shape[0], 3))
+        n_ch = self.channel_count
+        lum = np.zeros((directions.shape[0], n_ch))
+        ms1 = np.zeros((directions.shape[0], n_ch))
         for start in range(0, directions.shape[0], chunk):
-            out[start:start + chunk] = self._single_scattering_chunk(
-                camera_km, directions[start:start + chunk], sun_dir, outer_panels, inner_panels, order)
-        return out
+            lum[start:start + chunk], ms1[start:start + chunk] = self._ray_chunk(
+                camera_km, directions[start:start + chunk], sun_dir, outer_panels, inner_panels, order, isotropic,
+                ground_albedo)
+        return lum, ms1
 
-    def _single_scattering_chunk(self, c, dirs, sun, outer_panels, inner_panels, order):
+    def _ray_chunk(self, c, dirs, sun, outer_panels, inner_panels, order, isotropic, ground_albedo):
         n = dirs.shape[0]
+        n_ch = self.channel_count
         t_start, t_end = np.zeros(n), np.zeros(n)
+        hit_ground = np.zeros(n, dtype=bool)
         for i, d in enumerate(dirs):
             top = ray_sphere(c, d, self.top_radius_km)
             ground = ray_sphere(c, d, self.bottom_radius_km)
             t_start[i] = max(top[0], 0.0)
             t_end[i] = top[1]
-            if ground is not None and ground[0] > 0.0:
-                t_end[i] = min(t_end[i], ground[0])
+            if ground is not None and 0.0 < ground[0] < t_end[i]:
+                t_end[i] = ground[0]
+                hit_ground[i] = True
 
         # 視線上の求積点（オゾンの折れ目で区間を分割）
         cam_r = np.full(n, np.linalg.norm(c))
@@ -166,37 +230,61 @@ class Atmosphere:
         t = (mid[:, :, None] + half[:, :, None] * x).reshape(n, -1)       # (n, P·order)
         w = (half[:, :, None] * wx).reshape(n, -1)
 
-        def extinction_at(tt):  # tt: (n, M) の視線上の距離 → (n, M, 3)
+        def extinction_at(tt):  # tt: (n, M) の視線上の距離 → (n, M, C)
             p = c + tt[..., None] * dirs[:, None, :]
             return self.extinction(np.linalg.norm(p, axis=-1) - self.bottom_radius_km)
 
         # カメラ → 求積点の光学的厚さ: 区間全体の積分を累積 + 区間内の部分積分（区間先頭 → 点）
-        ext_nodes = extinction_at(t).reshape(n, outer_panels, order, 3)
+        ext_nodes = extinction_at(t).reshape(n, outer_panels, order, n_ch)
         panel_depth = np.einsum("npk,npkc->npc", (half[:, :, None] * wx), ext_nodes)
-        depth_before = np.concatenate([np.zeros((n, 1, 3)), np.cumsum(panel_depth, axis=1)[:, :-1]], axis=1)
+        cumulative = np.cumsum(panel_depth, axis=1)
+        depth_before = np.concatenate([np.zeros((n, 1, n_ch)), cumulative[:, :-1]], axis=1)
         t_nodes = t.reshape(n, outer_panels, order)
         sub_half = 0.5 * (t_nodes - edges[:, :-1, None])                   # (n, P, order)
         sub_mid = 0.5 * (t_nodes + edges[:, :-1, None])
         sub_t = sub_mid[..., None] + sub_half[..., None] * x               # (n, P, order, order)
-        sub_ext = extinction_at(sub_t.reshape(n, -1)).reshape(n, outer_panels, order, order, 3)
+        sub_ext = extinction_at(sub_t.reshape(n, -1)).reshape(n, outer_panels, order, order, n_ch)
         partial = np.einsum("npk,npkj,npkjc->npkc", sub_half, np.broadcast_to(wx, sub_half.shape + (order,)), sub_ext)
-        view_depth = (depth_before[:, :, None, :] + partial).reshape(n, -1, 3)
+        view_t = np.exp(-(depth_before[:, :, None, :] + partial).reshape(n, -1, n_ch))
 
         # 求積点での散乱と太陽方向の透過率
         p = c + t[..., None] * dirs[:, None, :]
         r = np.linalg.norm(p, axis=-1)
-        altitude = r - self.bottom_radius_km
-        rayleigh_d, mie_d, _ = self.densities(altitude)
+        rayleigh_d, mie_d, _ = self.densities(r - self.bottom_radius_km)
         cos_theta = dirs @ sun
-        phase_r = rayleigh_phase(cos_theta)[:, None]
-        phase_m = cornette_shanks_phase(self.mie_phase_g, cos_theta)[:, None]
-        scattering = (rayleigh_d[..., None] * self.rayleigh_scattering_per_km * phase_r[..., None]
-                      + mie_d[..., None] * self.mie_scattering_per_km * phase_m[..., None])
-        mu_sun = (p @ sun) / r
-        shadow = self.ray_intersects_ground(r, mu_sun)
-        sun_t = self.transmittance_to_top(r.ravel(), mu_sun.ravel(), inner_panels, order).reshape(r.shape + (3,))
-        sun_t[shadow] = 0.0
-        return np.einsum("nm,nmc->nc", w, np.exp(-view_depth) * scattering * sun_t)
+        if isotropic:
+            phase_r = phase_m = np.full((n, 1), 1.0 / (4.0 * np.pi))
+        else:
+            phase_r = rayleigh_phase(cos_theta)[:, None]
+            phase_m = cornette_shanks_phase(self.mie_phase_g, cos_theta)[:, None]
+        sigma_r = rayleigh_d[..., None] * self.rayleigh_scattering_per_km
+        sigma_m = mie_d[..., None] * self.mie_scattering_per_km
+        sun_t = self.sun_transmittance(p.reshape(-1, 3), sun, inner_panels, order).reshape(r.shape + (n_ch,))
+        lum = np.einsum("nm,nmc->nc", w, view_t * (sigma_r * phase_r[..., None] + sigma_m * phase_m[..., None]) * sun_t)
+        ms1 = np.einsum("nm,nmc->nc", w, view_t * (sigma_r + sigma_m))
+
+        if ground_albedo is not None and np.any(hit_ground):
+            # 地表のランバート反射: ρ/π · T_sun · cos(太陽天頂角)、カメラ → 地表の透過率を掛ける
+            g = hit_ground
+            ground_pos = c + t_end[g, None] * dirs[g]
+            normal = ground_pos / np.linalg.norm(ground_pos, axis=1, keepdims=True)
+            cos_sun = np.maximum(normal @ sun, 0.0)
+            ground_t = self.sun_transmittance(ground_pos, sun, inner_panels, order)
+            total_view_t = np.exp(-cumulative[g, -1, :])
+            lum[g] += total_view_t * ground_t * cos_sun[:, None] * np.asarray(ground_albedo) / np.pi
+        return lum, ms1
+
+    def sun_transmittance(self, points_km: np.ndarray, sun: np.ndarray, panels: int, order: int) -> np.ndarray:
+        """点（形状 (M, 3)）から太陽方向の透過率 (M, C)。惑星の影なら 0。"""
+
+        r = np.linalg.norm(points_km, axis=1)
+        mu = np.clip((points_km @ sun) / r, -1.0, 1.0)
+        # 影の点は計算しない（光線が惑星の内部を通り、負の高度で密度の exp が溢れるため。シェーダーも同じ順序）
+        lit = ~self.ray_intersects_ground(r, mu)
+        t = np.zeros((r.size, self.channel_count))
+        if np.any(lit):
+            t[lit] = self.transmittance_to_top(r[lit], mu[lit], panels, order)
+        return t
 
 
 # ---------------------------------------------------------------------- 補助関数

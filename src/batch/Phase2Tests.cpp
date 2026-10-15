@@ -95,10 +95,12 @@ int runSingleScattering(gfx::Device& device, const gfx::PipelineLibrary& pipelin
                 settings.primarySteps = 2048;
                 settings.sunMode = mode;
                 settings.nestedSteps = 256;
-                atmosphere::RaymarchView view;
+                settings.multipleScattering = false;  // V2 は単散乱のみ
+                atmosphere::SkyView view;
                 view.cameraPosKm = glm::vec3(0.0f, params.bottomRadiusKm + altitudeKm, 0.0f);
                 view.output = atmosphere::RaymarchOutput::TestPerLux;
                 view.directionUav = directions.uavIndex();
+                view.sunDisk = false;
 
                 device.upload().beginSlot(0);
                 device.executeImmediate([&](ID3D12GraphicsCommandList* cmd) {

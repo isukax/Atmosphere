@@ -2,6 +2,7 @@
 
 #include "app/Window.h"
 #include "atmosphere/AtmosphereRenderer.h"
+#include "atmosphere/PathTracer.h"
 #include "display/DisplayMonitor.h"
 #include "display/DisplayPass.h"
 #include "display/Swapchain.h"
@@ -21,7 +22,7 @@
 
 namespace app {
 
-/// 対話モードのアプリ本体（Phase 1: テストパターン + 表示パイプライン）。
+/// 対話モードのアプリ本体（テストパターン / 空: LUT・レイマーチ・パストレース + 表示パイプライン）。
 class App {
 public:
     explicit App(bool debugLayer);
@@ -30,7 +31,7 @@ public:
 
 private:
     enum class OutputModeSetting { Auto, SDR, HDR10 };
-    enum class SceneMode { TestPattern, Sky };
+    enum class SceneMode { TestPattern, SkyLut, SkyRaymarch, SkyPathTrace };
 
     void createSizeDependentResources();
     void refreshDisplay();
@@ -42,6 +43,8 @@ private:
     void updateCamera();
     void applyCoefficientSet(int index);
     void drawAtmosphereUi();
+    bool isSkyMode() const { return m_sceneMode != SceneMode::TestPattern; }
+    void resetPathTraceIfChanged();
 
     Window m_window;
     gfx::Device m_device;
@@ -51,6 +54,7 @@ private:
     display::DisplayPass m_displayPass;
     scene::TestPatternPass m_testPattern;
     std::unique_ptr<atmosphere::AtmosphereRenderer> m_atmosphereRenderer;
+    std::unique_ptr<atmosphere::PathTracer> m_pathTracer;
 
     gfx::Texture m_sceneColor;  // RGBA16F、fb 値（露出済み）、linear 作業色空間
     gfx::Texture m_uiTarget;    // R8G8B8A8_UNORM、sRGB 値、アルファ乗算済み
@@ -63,17 +67,18 @@ private:
     float m_exposureEv100 = 15.0f;
     display::WorkingColorSpace m_workingSpace = display::WorkingColorSpace::Rec709;
     scene::TestPatternSettings m_testPatternSettings;
-    SceneMode m_sceneMode = SceneMode::Sky;
+    SceneMode m_sceneMode = SceneMode::SkyLut;
 
-    // 大気（Phase 2: Transmittance LUT + 単散乱レイマーチ）
+    // 大気
     std::vector<atmosphere::CoefficientSet> m_coefficientSets;
     int m_coefficientIndex = 0;
     atmosphere::AtmosphereParams m_atmosphere;
+    atmosphere::AtmosphereQuality m_quality;  // LUT のステップ数・多重散乱の有無（既定値の理由は定義側）
     atmosphere::RaymarchSettings m_raymarch;
-    // [POINT] Transmittance LUT の積分区間数。論文の PC 設定は 40 だが、Phase 2 の検証（V1/V2）で
-    //         地平線付近の誤差が最大 1.8%（空の輝度で 1.4%）と分かった。LUT は大気パラメータの変更時しか
-    //         作り直さないので、既定を 500（誤差 0.09%）にする。
-    uint32_t m_transmittanceSteps = 500;
+    bool m_sunDisk = true;
+    uint32_t m_pathTraceMaxDepth = 32;
+    uint32_t m_pathTraceSamplesPerFrame = 1;
+    std::vector<uint8_t> m_pathTraceKey;  // 累積をリセットすべき入力（カメラ・大気・設定）のバイト列
     float m_solarIlluminanceFromSpectrumLux = 0.0f;
     scene::Camera m_camera;
     float m_cameraSpeedMps = 100.0f;

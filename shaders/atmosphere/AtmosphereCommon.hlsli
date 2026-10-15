@@ -7,6 +7,8 @@
 #ifndef ATMOSPHERE_COMMON_HLSLI
 #define ATMOSPHERE_COMMON_HLSLI
 
+#include "common/Math.hlsli"
+
 // [POINT] C++ の atmosphere::AtmosphereGpu（src/atmosphere/AtmosphereParams.h）と同じ並び。
 //         float3 + float の組で 16 バイトの行をちょうど埋めるので、HLSL と C++ の
 //         パッキングが一致する（static_assert で照合している）。
@@ -42,6 +44,10 @@ struct MediumSample
 // 高度 altitudeKm [km] での媒質の係数。
 MediumSample SampleMedium(AtmosphereParameters a, float altitudeKm)
 {
+    // [POINT] 高度は 0 以上にクランプする。惑星座標の float32 は地表付近（6360 km）で精度が ~0.5 m しかなく、
+    //         地表すれすれの点がわずかに負の高度になる。負の高度で密度が 1 を超えると、パストレーサーの
+    //         デルタトラッキングの前提（σt ≤ σ̄）が崩れ、惑星内部の点では exp が溢れて NaN になる。
+    altitudeKm = max(altitudeKm, 0.0);
     // [POINT] 密度分布: Rayleigh と Mie は指数（スケールハイト H で 1/e）、
     //         オゾンは 25 km を中心とした幅 30 km のテント関数（吸収のみ、散乱しない）。
     const float rayleighDensity = exp(-altitudeKm / a.rayleighScaleHeightKm);
@@ -173,6 +179,89 @@ float3 SampleTransmittanceLut(AtmosphereParameters a, Texture2D<float4> lut, Sam
                               float2 lutSize)
 {
     return lut.SampleLevel(s, TransmittanceRMuToUv(a, r, mu, lutSize), 0.0).rgb;
+}
+
+// ---------------------------------------------------------------------------
+// Multi-scattering LUT のパラメタ化（Hillaire 2020 §5.5）
+//   u = cos(太陽天頂角) を [-1, 1] → [0, 1]、v = 高度を [地表, 大気上端] → [0, 1]
+// ---------------------------------------------------------------------------
+
+// [POINT] 地表・大気上端のちょうど上の点は光線の判定が不安定になるので、内側へ少しずらす。
+static const float kSurfaceOffsetKm = 0.001;
+
+float2 MultiScatteringRMuSunToUv(AtmosphereParameters a, float r, float muSun, float2 lutSize)
+{
+    const float2 unit = float2(muSun * 0.5 + 0.5,
+                               saturate((r - a.bottomRadiusKm) / (a.topRadiusKm - a.bottomRadiusKm)));
+    return float2(FromUnitToSubUv(unit.x, lutSize.x), FromUnitToSubUv(unit.y, lutSize.y));
+}
+
+void MultiScatteringUvToRMuSun(AtmosphereParameters a, float2 uv, float2 lutSize, out float r, out float muSun)
+{
+    const float2 unit = float2(FromSubUvToUnit(uv.x, lutSize.x), FromSubUvToUnit(uv.y, lutSize.y));
+    muSun = clamp(unit.x * 2.0 - 1.0, -1.0, 1.0);
+    r = clamp(a.bottomRadiusKm + saturate(unit.y) * (a.topRadiusKm - a.bottomRadiusKm),
+              a.bottomRadiusKm + kSurfaceOffsetKm, a.topRadiusKm - kSurfaceOffsetKm);
+}
+
+// ---------------------------------------------------------------------------
+// Sky-View LUT のパラメタ化（Hillaire 2020 §5.3、参照実装の UvToSkyViewLutParams）
+//   u = 視線と太陽の方位差の余弦（太陽側 = 0、反対側 = 1）を平方根で非線形化
+//   v = 視線の天頂角。v = 0.5 がちょうど地平線（高度に応じた見かけの地平線）で、
+//       上半分が空、下半分が地面方向。どちらも地平線側に 2 次でテクセルを集める。
+// ---------------------------------------------------------------------------
+
+// [POINT] 見かけの地平線の天頂角は高度で変わる: cos β = √(r² − R²) / r（β は「真下」から地平線までの角度）。
+//         地平線を常に v = 0.5 に置くことで、カメラの高度が変わっても地平線付近の解像度が保たれる。
+void SkyViewUvToViewParams(AtmosphereParameters a, float2 uv, float2 lutSize, float r,
+                           out float viewZenithCos, out float lightViewCos)
+{
+    uv = float2(FromSubUvToUnit(uv.x, lutSize.x), FromSubUvToUnit(uv.y, lutSize.y));
+    const float horizonDistance = sqrt(max(r * r - a.bottomRadiusKm * a.bottomRadiusKm, 0.0));
+    const float beta = acos(horizonDistance / r);
+    const float zenithHorizonAngle = kPi - beta;
+    float viewZenithAngle;
+    if (uv.y < 0.5) {
+        float coord = 1.0 - 2.0 * uv.y;
+        coord = 1.0 - coord * coord;
+        viewZenithAngle = zenithHorizonAngle * coord;
+    } else {
+        float coord = uv.y * 2.0 - 1.0;
+        viewZenithAngle = zenithHorizonAngle + beta * coord * coord;
+    }
+    viewZenithCos = cos(viewZenithAngle);
+    lightViewCos = -(uv.x * uv.x * 2.0 - 1.0);
+}
+
+float2 SkyViewViewParamsToUv(AtmosphereParameters a, bool intersectGround, float viewZenithCos, float lightViewCos,
+                             float r, float2 lutSize)
+{
+    const float horizonDistance = sqrt(max(r * r - a.bottomRadiusKm * a.bottomRadiusKm, 0.0));
+    const float beta = acos(horizonDistance / r);
+    const float zenithHorizonAngle = kPi - beta;
+    const float viewZenithAngle = acos(clamp(viewZenithCos, -1.0, 1.0));
+    float2 uv;
+    if (!intersectGround) {
+        const float coord = 1.0 - sqrt(saturate(1.0 - viewZenithAngle / zenithHorizonAngle));
+        uv.y = coord * 0.5;
+    } else {
+        const float coord = sqrt(saturate((viewZenithAngle - zenithHorizonAngle) / beta));
+        uv.y = coord * 0.5 + 0.5;
+    }
+    uv.x = sqrt(saturate(-lightViewCos * 0.5 + 0.5));
+    return float2(FromUnitToSubUv(uv.x, lutSize.x), FromUnitToSubUv(uv.y, lutSize.y));
+}
+
+// ---------------------------------------------------------------------------
+// 検証用の方向グリッド（正距円筒）
+// ---------------------------------------------------------------------------
+
+// 方位 φ = 2π·(x+0.5)/W、仰角 e = π/2 − π·(y+0.5)/H。+Y が天頂。
+float3 EquirectDirection(uint2 pixel, uint2 size)
+{
+    const float phi = 2.0 * kPi * (float(pixel.x) + 0.5) / float(size.x);
+    const float elevation = 0.5 * kPi - kPi * (float(pixel.y) + 0.5) / float(size.y);
+    return float3(cos(elevation) * cos(phi), sin(elevation), cos(elevation) * sin(phi));
 }
 
 #endif // ATMOSPHERE_COMMON_HLSLI
