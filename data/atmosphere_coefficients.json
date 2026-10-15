@@ -1,0 +1,127 @@
+{
+  "generator": "reference/derive_coefficients.py",
+  "units": {
+    "rayleigh_scattering_per_km": "km^-1 at sea level",
+    "ozone_absorption_per_km": "km^-1 at max ozone density (25 km)",
+    "mie_scattering_per_km": "km^-1 at sea level",
+    "mie_absorption_per_km": "km^-1 at sea level",
+    "sun_color": "working-space RGB with luminance Y = 1 (multiply by illuminance in lux)"
+  },
+  "conditions": {
+    "cmfs": "CIE 1931 2 Degree Standard Observer",
+    "colour_version": "0.4.6",
+    "wavelength_range_nm": [
+      360,
+      830
+    ],
+    "wavelength_step_nm": 1.0,
+    "fit_distance_km": [
+      1.0,
+      300.0
+    ],
+    "spectral_source": "Bruneton 2017 demo.cc (ASTM G-173 ETR, O3 233K), BSD-3"
+  },
+  "solar_illuminance_lux_from_spectrum": 132538.22404207435,
+  "sets": [
+    {
+      "name": "Hillaire2020",
+      "working_space": "Rec709",
+      "method": "Hillaire 2020 / Bruneton 2017 values sampled at 680, 550, 440 nm, used as Rec.709 RGB",
+      "rayleigh_scattering_per_km": [
+        0.005802,
+        0.013558,
+        0.0331
+      ],
+      "ozone_absorption_per_km": [
+        0.00065,
+        0.001881,
+        8.5e-05
+      ],
+      "sun_color": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "mie_scattering_per_km": 0.0039959999999999996,
+      "mie_absorption_per_km": 0.00044399999999999995
+    },
+    {
+      "name": "SpectralFit709",
+      "working_space": "Rec709",
+      "method": "per-channel log-transmittance least-squares fit of solar-weighted spectral transmittance",
+      "rayleigh_scattering_per_km": [
+        0.007774422374557965,
+        0.014382158068273644,
+        0.038719281763476214
+      ],
+      "ozone_absorption_per_km": [
+        0.0024822288333473906,
+        0.0017729651005621448,
+        7.728806904216503e-06
+      ],
+      "sun_color": [
+        1.0928091507375606,
+        0.9765423470092859,
+        0.9590168726758761
+      ],
+      "fit_rms_log_transmittance": {
+        "rayleigh": [
+          0.027569187628589984,
+          0.0073405726939018145,
+          0.4533739262057306
+        ],
+        "ozone": [
+          0.00044707041157843267,
+          0.0009157539440497811,
+          0.0016855712515767814
+        ]
+      },
+      "rayleigh_effective_wavelength_nm": [
+        632.0372308507699,
+        541.9430861465643,
+        423.08523691754
+      ],
+      "mie_scattering_per_km": 0.0039959999999999996,
+      "mie_absorption_per_km": 0.00044399999999999995
+    },
+    {
+      "name": "SpectralFit2020",
+      "working_space": "Rec2020",
+      "method": "per-channel log-transmittance least-squares fit of solar-weighted spectral transmittance",
+      "rayleigh_scattering_per_km": [
+        0.009255343562363762,
+        0.01338576752966149,
+        0.029269893405016418
+      ],
+      "ozone_absorption_per_km": [
+        0.0021293070254069842,
+        0.001799293700101323,
+        0.00017654912214134816
+      ],
+      "sun_color": [
+        1.0487295106152739,
+        0.9843769380194295,
+        0.962752395591892
+      ],
+      "fit_rms_log_transmittance": {
+        "rayleigh": [
+          0.018575008049730692,
+          0.023234849149049806,
+          0.14077236349717356
+        ],
+        "ozone": [
+          0.001731470332931017,
+          0.0011805519241390493,
+          5.4457499184867416e-05
+        ]
+      },
+      "rayleigh_effective_wavelength_nm": [
+        605.0782725994134,
+        551.7583000637668,
+        453.7372236412634
+      ],
+      "mie_scattering_per_km": 0.0039959999999999996,
+      "mie_absorption_per_km": 0.00044399999999999995
+    }
+  ]
+}

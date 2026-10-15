@@ -2,9 +2,11 @@
 //
 // 使い方:
 //   atmosphere.exe [--debug]                      対話モード
-//   atmosphere.exe --test <gt7|pq> --out <dir>    バッチ検証（Python の reference/validate_phase1.py から起動）
+//   atmosphere.exe --test <name> --out <dir>      バッチ検証（Python の reference/validate_phase*.py から起動）
+//     Phase 1: gt7, pq   Phase 2: transmittance, single_scattering
 #include "app/App.h"
 #include "batch/Phase1Tests.h"
+#include "batch/Phase2Tests.h"
 
 #include <iostream>
 #include <string>
@@ -32,7 +34,10 @@ int main(int argc, char** argv)
         if (!test.empty()) {
             gfx::Device device(debugLayer);
             gfx::PipelineLibrary pipelines(device, ATMOS_SHADER_DIR);
-            return batch::runPhase1Test(device, pipelines, test, outDir);
+            if (test == "gt7" || test == "pq") {
+                return batch::runPhase1Test(device, pipelines, test, outDir);
+            }
+            return batch::runPhase2Test(device, pipelines, test, outDir);
         }
         app::App application(debugLayer);
         return application.run();

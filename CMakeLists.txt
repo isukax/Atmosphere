@@ -63,6 +63,8 @@ endfunction()
 compile_shader(display/Display.hlsl VSMain vs_6_6 Display_vs)
 compile_shader(display/Display.hlsl PSMain ps_6_6 Display_ps)
 compile_shader(scene/TestPattern.hlsl CSMain cs_6_6 TestPattern_cs)
+compile_shader(atmosphere/TransmittanceLut.hlsl CSMain cs_6_6 TransmittanceLut_cs)
+compile_shader(atmosphere/SkyRaymarch.hlsl CSMain cs_6_6 SkyRaymarch_cs)
 
 add_custom_target(shaders DEPENDS ${SHADER_OUTPUTS} SOURCES ${SHADER_HEADERS})
 
@@ -73,6 +75,8 @@ add_executable(atmosphere
   src/main.cpp
   src/app/App.cpp
   src/app/Window.cpp
+  src/atmosphere/AtmosphereParams.cpp
+  src/atmosphere/AtmosphereRenderer.cpp
   src/gfx/Device.cpp
   src/gfx/Descriptors.cpp
   src/gfx/Pipeline.cpp
@@ -82,10 +86,12 @@ add_executable(atmosphere
   src/display/DisplayPass.cpp
   src/display/GT7ToneMapping.cpp
   src/display/Swapchain.cpp
+  src/scene/Camera.cpp
   src/scene/TestPatternPass.cpp
   src/ui/ImGuiLayer.cpp
   src/io/ExrWriter.cpp
   src/batch/Phase1Tests.cpp
+  src/batch/Phase2Tests.cpp
 )
 add_dependencies(atmosphere shaders)
 
@@ -93,7 +99,8 @@ target_include_directories(atmosphere PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_compile_definitions(atmosphere PRIVATE
   UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN
   GLM_FORCE_XYZW_ONLY
-  ATMOS_SHADER_DIR="${SHADER_OUT_DIR}")
+  ATMOS_SHADER_DIR="${SHADER_OUT_DIR}"
+  ATMOS_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data")
 # /utf-8: ソースは BOM なし UTF-8（日本語コメント）なので明示する。
 target_compile_options(atmosphere PRIVATE /W4 /permissive- /utf-8 /Zc:__cplusplus)
 target_link_libraries(atmosphere PRIVATE

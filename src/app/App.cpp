@@ -2,10 +2,12 @@
 
 #include <glm/geometric.hpp>
 #include <glm/gtc/packing.hpp>
+#include <glm/matrix.hpp>
 #include <imgui.h>
 
 #include <algorithm>
 #include <cmath>
+#include <numbers>
 
 namespace app {
 namespace {
@@ -43,6 +45,45 @@ App::App(bool debugLayer)
                          m_display.maxFullFrameLuminanceNits, m_display.minLuminanceNits,
                          display::toString(m_display.colorSpace)));
     applyOutputConfiguration(true);
+
+    const std::filesystem::path coefficientPath = std::filesystem::path(ATMOS_DATA_DIR) / "atmosphere_coefficients.json";
+    m_coefficientSets = atmosphere::loadCoefficientSets(coefficientPath);
+    m_solarIlluminanceFromSpectrumLux = atmosphere::loadSolarIlluminanceFromSpectrumLux(coefficientPath);
+    applyCoefficientSet(0);  // 先頭 = Hillaire2020
+    m_atmosphereRenderer = std::make_unique<atmosphere::AtmosphereRenderer>(m_device, m_pipelines);
+}
+
+void App::applyCoefficientSet(int index)
+{
+    m_coefficientIndex = std::clamp(index, 0, static_cast<int>(m_coefficientSets.size()) - 1);
+    m_atmosphere.applyCoefficientSet(m_coefficientSets[static_cast<size_t>(m_coefficientIndex)]);
+    // [POINT] 係数セットは特定の作業色空間の RGB で定義されている（§2.6）。セットを選ぶと
+    //         作業色空間もそれに合わせる（Rec.709 の係数を Rec.2020 として解釈しないため）。
+    m_workingSpace = m_atmosphere.workingSpace;
+    logEvent(std::format("Coefficient set: {} ({})", m_atmosphere.coefficientSet,
+                         display::toString(m_workingSpace)));
+}
+
+void App::updateCamera()
+{
+    const ImGuiIO& io = ImGui::GetIO();
+    if (!io.WantCaptureMouse && ImGui::IsMouseDown(ImGuiMouseButton_Right)) {
+        constexpr float kRadPerPixel = 0.003f;
+        m_camera.yawRad += io.MouseDelta.x * kRadPerPixel;
+        m_camera.pitchRad = std::clamp(m_camera.pitchRad - io.MouseDelta.y * kRadPerPixel, -1.55f, 1.55f);
+    }
+    if (!io.WantCaptureKeyboard) {
+        glm::vec3 move(0.0f);
+        move += m_camera.forward() * static_cast<float>(ImGui::IsKeyDown(ImGuiKey_W) - ImGui::IsKeyDown(ImGuiKey_S));
+        move += m_camera.right() * static_cast<float>(ImGui::IsKeyDown(ImGuiKey_D) - ImGui::IsKeyDown(ImGuiKey_A));
+        move.y += static_cast<float>(ImGui::IsKeyDown(ImGuiKey_E) - ImGui::IsKeyDown(ImGuiKey_Q));
+        const float speed = m_cameraSpeedMps * (ImGui::IsKeyDown(ImGuiKey_LeftShift) ? 20.0f : 1.0f);
+        m_camera.positionM += move * (speed * io.DeltaTime);
+    }
+    // [POINT] Phase 2 ではカメラを大気の内側（地表 1 m 〜 大気上端の 1 m 下）に制限する。
+    //         宇宙視点は範囲外（design.md §11）。
+    const float topM = (m_atmosphere.topRadiusKm - m_atmosphere.bottomRadiusKm) * 1000.0f - m_atmosphere.originAltitudeM;
+    m_camera.positionM.y = std::clamp(m_camera.positionM.y, 1.0f - m_atmosphere.originAltitudeM, topM - 1.0f);
 }
 
 App::~App()
@@ -186,12 +227,26 @@ void App::renderFrame()
     }
 
     m_imgui->newFrame();
+    updateCamera();
     drawUi();
 
-    // 1) シーン（Phase 1 はテストパターン）
-    m_sceneColor.transition(cmd, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    m_testPattern.record(cmd, m_device.upload(), m_sceneColor.uavIndex(), w, h, exposureScale(), m_workingSpace,
-                         m_testPatternSettings);
+    // 1) シーン
+    if (m_sceneMode == SceneMode::Sky) {
+        // Transmittance LUT（媒質パラメータが変わったときだけ作り直す）→ 空の単散乱レイマーチ
+        m_atmosphereRenderer->updateTransmittanceLut(cmd, m_device.upload(), m_atmosphere, m_transmittanceSteps);
+        m_sceneColor.transition(cmd, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        atmosphere::RaymarchView view;
+        const float aspect = static_cast<float>(w) / static_cast<float>(h);
+        view.invViewProjRot = glm::inverse(m_camera.projection(aspect) * m_camera.viewRotation());
+        view.cameraPosKm = atmosphere::worldToPlanetKm(m_atmosphere, m_camera.positionM);
+        view.exposureScale = exposureScale();
+        m_atmosphereRenderer->renderSkyRaymarch(cmd, m_device.upload(), m_atmosphere, view, m_raymarch,
+                                                m_sceneColor.uavIndex(), w, h);
+    } else {
+        m_sceneColor.transition(cmd, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        m_testPattern.record(cmd, m_device.upload(), m_sceneColor.uavIndex(), w, h, exposureScale(), m_workingSpace,
+                             m_testPatternSettings);
+    }
 
     // 2) ピクセルピッカー: マウス位置の 1 texel を読み戻しバッファへ
     const ImVec2 mouse = ImGui::GetIO().MousePos;
@@ -241,7 +296,14 @@ void App::drawUi()
 {
     ImGui::SetNextWindowPos(ImVec2(10, 10), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowSize(ImVec2(440, 0), ImGuiCond_FirstUseEver);
-    ImGui::Begin("Atmosphere - Phase 1");
+    ImGui::Begin("Atmosphere - Phase 2");
+    int sceneMode = static_cast<int>(m_sceneMode);
+    if (ImGui::Combo("Scene", &sceneMode, "Test pattern\0Sky (single scattering raymarch)\0")) {
+        m_sceneMode = static_cast<SceneMode>(sceneMode);
+        if (m_sceneMode == SceneMode::Sky) {
+            m_workingSpace = m_atmosphere.workingSpace;
+        }
+    }
 
     if (ImGui::CollapsingHeader("Display", ImGuiTreeNodeFlags_DefaultOpen)) {
         ImGui::Text("Monitor: %s", m_display.deviceName.c_str());
@@ -271,12 +333,21 @@ void App::drawUi()
         ImGui::SliderFloat("EV100", &m_exposureEv100, -6.0f, 20.0f, "%.2f");
         ImGui::Text("k = 1/(1.2*2^EV100) = %.3e /(cd/m2)", exposureScale());
         ImGui::Text("fb 1.0 (= 100 nit on display) <- %.4g cd/m2 in scene", 1.0f / exposureScale());
+        // 空の表示中は作業色空間を係数セットに従わせる（Atmosphere セクションで選ぶ）
+        ImGui::BeginDisabled(m_sceneMode == SceneMode::Sky);
         int space = static_cast<int>(m_workingSpace);
         if (ImGui::Combo("Working space", &space, "Rec.709\0Rec.2020\0")) {
             m_workingSpace = static_cast<display::WorkingColorSpace>(space);
         }
-        ImGui::DragFloatRange2("Pattern log10(cd/m2)", &m_testPatternSettings.log10MinNits,
-                               &m_testPatternSettings.log10MaxNits, 0.05f, -4.0f, 10.0f, "%.1f");
+        ImGui::EndDisabled();
+        if (m_sceneMode == SceneMode::TestPattern) {
+            ImGui::DragFloatRange2("Pattern log10(cd/m2)", &m_testPatternSettings.log10MinNits,
+                                   &m_testPatternSettings.log10MaxNits, 0.05f, -4.0f, 10.0f, "%.1f");
+        }
+    }
+
+    if (m_sceneMode == SceneMode::Sky) {
+        drawAtmosphereUi();
     }
 
     if (ImGui::CollapsingHeader("Pixel picker", ImGuiTreeNodeFlags_DefaultOpen) && m_pickedX >= 0) {
@@ -305,6 +376,77 @@ void App::drawUi()
         }
     }
     ImGui::End();
+}
+
+void App::drawAtmosphereUi()
+{
+    if (ImGui::CollapsingHeader("Camera", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::TextDisabled("RMB drag: look, WASD/QE: move, Shift: x20");
+        float altitudeM = m_camera.positionM.y + m_atmosphere.originAltitudeM;
+        if (ImGui::SliderFloat("Altitude [m]", &altitudeM, 1.0f, 99000.0f, "%.0f", ImGuiSliderFlags_Logarithmic)) {
+            m_camera.positionM.y = altitudeM - m_atmosphere.originAltitudeM;
+        }
+        ImGui::SliderFloat("Speed [m/s]", &m_cameraSpeedMps, 1.0f, 10000.0f, "%.0f", ImGuiSliderFlags_Logarithmic);
+        float fovDeg = m_camera.verticalFovRad * 180.0f / std::numbers::pi_v<float>;
+        if (ImGui::SliderFloat("Vertical FOV [deg]", &fovDeg, 10.0f, 120.0f, "%.0f")) {
+            m_camera.verticalFovRad = fovDeg * std::numbers::pi_v<float> / 180.0f;
+        }
+        ImGui::Text("Yaw %.1f deg, pitch %.1f deg", m_camera.yawRad * 180.0f / std::numbers::pi_v<float>,
+                    m_camera.pitchRad * 180.0f / std::numbers::pi_v<float>);
+    }
+
+    if (ImGui::CollapsingHeader("Atmosphere", ImGuiTreeNodeFlags_DefaultOpen)) {
+        std::string names;
+        for (const atmosphere::CoefficientSet& set : m_coefficientSets) {
+            names += set.name + " (" + display::toString(set.workingSpace) + ")";
+            names.push_back('\0');
+        }
+        int index = m_coefficientIndex;
+        if (ImGui::Combo("Coefficient set", &index, names.c_str())) {
+            applyCoefficientSet(index);
+        }
+        const glm::vec3& rs = m_atmosphere.rayleighScatteringPerKm;
+        const glm::vec3& oz = m_atmosphere.ozoneAbsorptionPerKm;
+        ImGui::Text("Rayleigh sigma_s [1e-3/km]: %.3f %.3f %.3f", rs.x * 1e3f, rs.y * 1e3f, rs.z * 1e3f);
+        ImGui::Text("Ozone sigma_a [1e-3/km]   : %.3f %.3f %.3f", oz.x * 1e3f, oz.y * 1e3f, oz.z * 1e3f);
+        ImGui::Text("Mie sigma_s / sigma_a [1e-3/km]: %.3f / %.3f", m_atmosphere.mieScatteringPerKm.x * 1e3f,
+                    m_atmosphere.mieAbsorptionPerKm.x * 1e3f);
+        ImGui::Text("Sun color (Y=1): %.3f %.3f %.3f", m_atmosphere.sunColor.x, m_atmosphere.sunColor.y,
+                    m_atmosphere.sunColor.z);
+        ImGui::SliderFloat("Mie g", &m_atmosphere.miePhaseG, 0.0f, 0.99f, "%.2f");
+
+        ImGui::SeparatorText("Sun");
+        ImGui::SliderFloat("Zenith [deg]", &m_atmosphere.sunZenithDeg, 0.0f, 120.0f, "%.2f");
+        ImGui::SliderFloat("Azimuth [deg]", &m_atmosphere.sunAzimuthDeg, -180.0f, 180.0f, "%.1f");
+        ImGui::DragFloat("Illuminance [lx]", &m_atmosphere.sunIlluminanceLux, 100.0f, 0.0f, 1.0e6f, "%.0f");
+        ImGui::Text("(from ASTM G-173 spectrum: %.0f lx)", m_solarIlluminanceFromSpectrumLux);
+
+        ImGui::SeparatorText("Quality");
+        int lutSteps = static_cast<int>(m_transmittanceSteps);
+        if (ImGui::SliderInt("Transmittance LUT steps", &lutSteps, 4, 1000, "%d", ImGuiSliderFlags_Logarithmic)) {
+            m_transmittanceSteps = static_cast<uint32_t>(lutSteps);
+        }
+        int primary = static_cast<int>(m_raymarch.primarySteps);
+        if (ImGui::SliderInt("View ray steps", &primary, 4, 512, "%d", ImGuiSliderFlags_Logarithmic)) {
+            m_raymarch.primarySteps = static_cast<uint32_t>(primary);
+        }
+        int sunMode = static_cast<int>(m_raymarch.sunMode);
+        if (ImGui::Combo("Sun transmittance", &sunMode, "Transmittance LUT\0Nested raymarch (reference)\0")) {
+            m_raymarch.sunMode = static_cast<atmosphere::SunTransmittanceMode>(sunMode);
+        }
+        if (m_raymarch.sunMode == atmosphere::SunTransmittanceMode::Nested) {
+            int nested = static_cast<int>(m_raymarch.nestedSteps);
+            if (ImGui::SliderInt("Nested steps", &nested, 4, 256, "%d", ImGuiSliderFlags_Logarithmic)) {
+                m_raymarch.nestedSteps = static_cast<uint32_t>(nested);
+            }
+        }
+
+        ImGui::SeparatorText("Transmittance LUT (256x64)");
+        // 横軸: 大気上端までの距離（左 = 真上、右 = 地平線）、縦軸: 高度（上 = 地表、下 = 大気上端）
+        const gfx::Texture& lut = m_atmosphereRenderer->transmittanceLut();
+        ImGui::Image(static_cast<ImTextureID>(m_device.bindless().gpu(lut.srvIndex()).ptr), ImVec2(384.0f, 96.0f));
+        ImGui::TextDisabled("x: view zenith (left: up, right: horizon), y: altitude (top: ground)");
+    }
 }
 
 } // namespace app
