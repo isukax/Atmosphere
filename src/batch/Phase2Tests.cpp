@@ -19,14 +19,7 @@ std::vector<float> toFloats(const std::vector<uint8_t>& bytes)
 atmosphere::AtmosphereParams defaultParams()
 {
     // 検証は論文値のセット（Hillaire2020、Rec.709）で行う。
-    atmosphere::AtmosphereParams params;
-    for (const atmosphere::CoefficientSet& set :
-         atmosphere::loadCoefficientSets(std::filesystem::path(ATMOS_DATA_DIR) / "atmosphere_coefficients.json")) {
-        if (set.name == "Hillaire2020") {
-            params.applyCoefficientSet(set);
-        }
-    }
-    return params;
+    return atmosphere::loadDefaultParams(std::filesystem::path(ATMOS_DATA_DIR) / "atmosphere_coefficients.json");
 }
 
 int runTransmittance(gfx::Device& device, const gfx::PipelineLibrary& pipelines, const std::filesystem::path& outDir)

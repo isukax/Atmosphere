@@ -68,6 +68,18 @@ float loadSolarIlluminanceFromSpectrumLux(const std::filesystem::path& path)
     return nlohmann::json::parse(file).at("solar_illuminance_lux_from_spectrum").get<float>();
 }
 
+AtmosphereParams loadDefaultParams(const std::filesystem::path& coefficientPath)
+{
+    AtmosphereParams params;
+    for (const CoefficientSet& set : loadCoefficientSets(coefficientPath)) {
+        if (set.name == "Hillaire2020") {
+            params.applyCoefficientSet(set);
+        }
+    }
+    params.sunIlluminanceLux = loadSolarIlluminanceFromSpectrumLux(coefficientPath);
+    return params;
+}
+
 void AtmosphereParams::applyCoefficientSet(const CoefficientSet& set)
 {
     rayleighScatteringPerKm = set.rayleighScatteringPerKm;

@@ -49,7 +49,8 @@ App::App(bool debugLayer)
     const std::filesystem::path coefficientPath = std::filesystem::path(ATMOS_DATA_DIR) / "atmosphere_coefficients.json";
     m_coefficientSets = atmosphere::loadCoefficientSets(coefficientPath);
     m_solarIlluminanceFromSpectrumLux = atmosphere::loadSolarIlluminanceFromSpectrumLux(coefficientPath);
-    applyCoefficientSet(0);  // 先頭 = Hillaire2020
+    m_atmosphere = atmosphere::loadDefaultParams(coefficientPath);
+    applyCoefficientSet(0);  // 先頭 = Hillaire2020（作業色空間の同期とログのため）
     m_atmosphereRenderer = std::make_unique<atmosphere::AtmosphereRenderer>(m_device, m_pipelines);
 }
 
@@ -419,7 +420,11 @@ void App::drawAtmosphereUi()
         ImGui::SliderFloat("Zenith [deg]", &m_atmosphere.sunZenithDeg, 0.0f, 120.0f, "%.2f");
         ImGui::SliderFloat("Azimuth [deg]", &m_atmosphere.sunAzimuthDeg, -180.0f, 180.0f, "%.1f");
         ImGui::DragFloat("Illuminance [lx]", &m_atmosphere.sunIlluminanceLux, 100.0f, 0.0f, 1.0e6f, "%.0f");
-        ImGui::Text("(from ASTM G-173 spectrum: %.0f lx)", m_solarIlluminanceFromSpectrumLux);
+        ImGui::Text("Default (ASTM G-173 spectrum): %.0f lx", m_solarIlluminanceFromSpectrumLux);
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Reset")) {
+            m_atmosphere.sunIlluminanceLux = m_solarIlluminanceFromSpectrumLux;
+        }
 
         ImGui::SeparatorText("Quality");
         int lutSteps = static_cast<int>(m_transmittanceSteps);

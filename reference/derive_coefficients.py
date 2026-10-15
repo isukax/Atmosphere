@@ -61,7 +61,10 @@ def fit_channel_coefficients(sigma_per_km: np.ndarray, weights: np.ndarray) -> t
         d = FIT_DISTANCE_KM[valid]
         y = -np.log(t_channel[valid, c])
         # 原点を通る直線 y = σ·d の最小二乗解
-        sigma_fit[c] = float(np.dot(d, y) / np.dot(d, d))
+        # [POINT] σ < 0（負の吸収 = 光の増幅）は物理的に不正なので 0 に制限する（非負制約付き最小二乗）。
+        #         Rec.709 の B 等色関数は負の部分がオゾンの吸収帯（約 600 nm）にかかり、制約なしでは
+        #         B チャンネルのオゾン係数が −2×10⁻⁵ km⁻¹ になる。
+        sigma_fit[c] = max(0.0, float(np.dot(d, y) / np.dot(d, d)))
         rms[c] = float(np.sqrt(np.mean((y - sigma_fit[c] * d) ** 2)))
     return sigma_fit, rms
 

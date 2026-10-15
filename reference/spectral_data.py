@@ -31,8 +31,11 @@
   OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-単位はすべてコメントに記す。波長 λ の表は 360〜830 nm、10 nm 間隔（各値はその波長から 10 nm の区間平均。
-Bruneton と同様に、値は区間先頭の波長でのサンプルとして扱う）。
+単位はすべてコメントに記す。波長 λ の表は 360〜830 nm、10 nm 間隔で、各値は区間 [λ, λ+10) nm の平均。
+
+[POINT] 表の値は「その波長での値」ではなく「10 nm 区間の平均」なので、区間内で一定の階段関数として扱う
+        （bin_value）。Bruneton の実装は値を区間先頭の波長のサンプルとして線形補間しており、これだと
+        スペクトルが実質 5 nm 短波長側へずれる。太陽照度では約 0.5% の差になる（docs/design.md §14）。
 """
 
 from __future__ import annotations
@@ -83,17 +86,23 @@ def rayleigh_scattering_per_km(wavelength_nm: np.ndarray) -> np.ndarray:
     return RAYLEIGH_COEFF_PER_M * np.power(wavelength_nm * 1e-3, -4.0) * 1000.0
 
 
-def ozone_absorption_per_km(wavelength_nm: np.ndarray) -> np.ndarray:
-    """オゾン最大密度（高度 25 km）での吸収係数 [km⁻¹]。表を線形補間する。"""
+def bin_value(table: np.ndarray, wavelength_nm: np.ndarray) -> np.ndarray:
+    """10 nm 区間平均の表を階段関数として評価する。λ ∈ [360 + 10i, 370 + 10i) → table[i]（範囲外は端の区間）。"""
 
-    cross_section = np.interp(wavelength_nm, WAVELENGTHS_NM, OZONE_CROSS_SECTION_M2)
-    return MAX_OZONE_NUMBER_DENSITY_PER_M3 * cross_section * 1000.0
+    index = np.floor((np.asarray(wavelength_nm, dtype=np.float64) - WAVELENGTHS_NM[0]) / 10.0).astype(int)
+    return table[np.clip(index, 0, table.size - 1)]
+
+
+def ozone_absorption_per_km(wavelength_nm: np.ndarray) -> np.ndarray:
+    """オゾン最大密度（高度 25 km）での吸収係数 [km⁻¹]。"""
+
+    return MAX_OZONE_NUMBER_DENSITY_PER_M3 * bin_value(OZONE_CROSS_SECTION_M2, wavelength_nm) * 1000.0
 
 
 def solar_irradiance(wavelength_nm: np.ndarray) -> np.ndarray:
-    """大気圏外の太陽分光放射照度 [W·m⁻²·nm⁻¹]。表を線形補間（範囲外は端の値）。"""
+    """大気圏外の太陽分光放射照度 [W·m⁻²·nm⁻¹]。"""
 
-    return np.interp(wavelength_nm, WAVELENGTHS_NM, SOLAR_IRRADIANCE_W_PER_M2_NM)
+    return bin_value(SOLAR_IRRADIANCE_W_PER_M2_NM, wavelength_nm)
 
 
 def mie_extinction_per_km() -> float:

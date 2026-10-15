@@ -51,7 +51,11 @@ struct AtmosphereParams {
     float ozoneHalfWidthKm = 15.0f;
     glm::vec3 groundAlbedo{0.3f};
     // 太陽
-    float sunIlluminanceLux = 128000.0f;  // 大気上端、太陽方向に垂直な面での照度
+    // [POINT] 大気上端・太陽方向に垂直な面での照度 [lx]。既定値はここに書かず、
+    //         data/atmosphere_coefficients.json の solar_illuminance_lux_from_spectrum
+    //         （ASTM G-173 から計算、約 133,121 lx）を loadDefaultParams() で設定する。
+    //         太陽の色（sunColor）と同じスペクトルから求めた値にして、出どころを 1 つにするため（design.md D14）。
+    float sunIlluminanceLux = 0.0f;
     glm::vec3 sunColor{1.0f};             // 作業色空間の RGB、Y = 1
     float sunAngularRadiusRad = 0.004675f;
     float sunZenithDeg = 45.0f;
@@ -89,6 +93,9 @@ struct AtmosphereGpu {
     bool operator==(const AtmosphereGpu&) const = default;
 };
 static_assert(sizeof(AtmosphereGpu) == 6 * 16);
+
+/// 既定のパラメータ: 係数セット "Hillaire2020" を適用し、太陽照度を JSON のスペクトル由来の値にする。
+AtmosphereParams loadDefaultParams(const std::filesystem::path& coefficientPath);
 
 AtmosphereGpu toGpu(const AtmosphereParams& params);
 
