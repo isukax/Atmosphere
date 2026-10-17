@@ -7,6 +7,7 @@
 #define ATMOSPHERE_INTEGRATE_HLSLI
 
 #include "common/Bindless.hlsli"
+#include "common/Shadow.hlsli"
 #include "atmosphere/AtmosphereCommon.hlsli"
 #include "atmosphere/Phase.hlsli"
 
@@ -21,6 +22,60 @@ struct AtmosphereLuts
     float2 multiScatteringSize;
 };
 
+// 不透明物（地形・球）の太陽の影。2 段のカスケード（design.md §5.5、§5.6）
+struct OpaqueShadowParameters
+{
+    uint farSrv;          // 全体のカスケード。無効値なら影なし
+    uint nearSrv;         // 近景のカスケード。無効値なら全体だけ
+    float4x4 farToUvz;    // カメラ相対の位置 [m] → (u, v, 深度)
+    float4x4 nearToUvz;
+};
+
+static const float kGoldenAngle = 2.39996323;  // 黄金角 [rad]（円盤の点の並び）
+static const uint kShadowFilterTaps = 12;
+
+// 点（カメラ相対 [m]）で太陽が見える割合 [0, 1]。
+// filterRadiusM > 0 なら、光源から見た半径 filterRadiusM [m] の円盤を 12 点の PCF で平均する（design.md §5.6 の
+// 方式 1）。rotation: 円盤の点の並びを回す角度 [rad]（ステップごとに変えて、点の並びの模様を目立たなくする）
+float SampleOpaqueShadow(OpaqueShadowParameters p, float3 cameraRelativeM, float filterRadiusM, float rotation)
+{
+    if (p.farSrv == kInvalidDescriptorIndex) {
+        return 1.0;
+    }
+    // [POINT] 近景のカスケードは、点が u, v, 深度とも範囲の内側のときだけ使う。近景の範囲より光源から遠い点は、
+    //         近景の奥行きの範囲の外（さらに遠い側）の遮蔽物を取りこぼすので、全体のカスケードを使う。
+    uint srv = p.farSrv;
+    float4x4 toUvz = p.farToUvz;
+    if (p.nearSrv != kInvalidDescriptorIndex) {
+        const float3 uvzNear = mul(p.nearToUvz, float4(cameraRelativeM, 1.0)).xyz;
+        if (all(uvzNear > 0.01) && all(uvzNear < 0.99)) {
+            srv = p.nearSrv;
+            toUvz = p.nearToUvz;
+        }
+    }
+    const float3 uvz = mul(toUvz, float4(cameraRelativeM, 1.0)).xyz;
+    if (filterRadiusM <= 0.0) {
+        return SampleShadowMap(srv, uvz);
+    }
+    // 光源空間の 1 m あたりの (u, v) = 行列の 1 行目・2 行目の長さ（軸 / 範囲の幅）
+    const float2 radiusUv = filterRadiusM * float2(length(toUvz[0].xyz), length(toUvz[1].xyz));
+    Texture2D<float> map = ResourceDescriptorHeap[NonUniformResourceIndex(srv)];
+    float width;
+    float height;
+    map.GetDimensions(width, height);
+    if (max(radiusUv.x * width, radiusUv.y * height) < 0.5) {
+        return SampleShadowMap(srv, uvz);  // 円盤が半テクセルより小さい（近い所）: 1 回で同じ
+    }
+    float sum = 0.0;
+    [unroll] for (uint k = 0; k < kShadowFilterTaps; ++k) {
+        // Vogel の螺旋: 半径 √((k + 0.5)/N)、角度 k × 黄金角（円盤の中に一様に並ぶ）
+        const float r = sqrt((float(k) + 0.5) / float(kShadowFilterTaps));
+        const float angle = float(k) * kGoldenAngle + rotation;
+        sum += SampleShadowMap(srv, float3(uvz.xy + r * float2(cos(angle), sin(angle)) * radiusUv, uvz.z));
+    }
+    return sum / float(kShadowFilterTaps);
+}
+
 struct IntegrationSettings
 {
     uint stepCount;
@@ -30,15 +85,34 @@ struct IntegrationSettings
     bool isotropicPhase;        // 位相関数を 1/(4π) にする（Multi-scattering LUT の生成用）
     bool groundRadiance;        // 地表に当たったら地表のランバート反射を加える（Multi-scattering LUT の生成用）
     bool uniformSteps;          // true: 区間を等間隔に置く（Multi-scattering LUT）/ false: 2 次配置（Sky-View LUT・レイマーチ）
-    bool separateMiePhase;      // true: Mie の単散乱を luminance に入れず、位相関数なしで mieSingleNoPhase に分ける（Sky-View LUT 用）
+    bool separateMiePhase;      // true: Mie の単散乱を luminance に入れず、位相関数なしで mieSingleNoPhase に分ける（Sky-View LUT・空気遠近法用）
+    float maxDistanceKm;        // 積分する距離の上限 [km]（地形・空気遠近法のボクセルまで）。上限なしは kNoDistanceLimitKm
+    // 不透明物（地形）の太陽の影（design.md §5.5）。farSrv が無効値なら影なし。光線の原点がカメラのときだけ使える
+    OpaqueShadowParameters opaqueShadow;
+    // 影をぼかす円盤の半径 / カメラからの距離 [m/m]（0 なら 1 回の比較。design.md §5.6 の方式 1）
+    float opaqueShadowFilterRadiusPerM;
 };
+
+// 影を使わない積分の設定（opaqueShadow* を埋める）
+void DisableOpaqueShadow(inout IntegrationSettings s)
+{
+    s.opaqueShadow.farSrv = kInvalidDescriptorIndex;
+    s.opaqueShadow.nearSrv = kInvalidDescriptorIndex;
+    s.opaqueShadow.farToUvz = (float4x4)0;
+    s.opaqueShadow.nearToUvz = (float4x4)0;
+    s.opaqueShadowFilterRadiusPerM = 0.0;
+}
+
+static const float kNoDistanceLimitKm = 1e9;
 
 struct ScatteringResult
 {
     float3 luminance;         // 単位照度あたりの輝度 [sr⁻¹]（separateMiePhase なら Mie の単散乱を除く）
     float3 mieSingleNoPhase;  // ∫ T_view·σs_M·T_sun dt [無次元]。× p_M(θ) [sr⁻¹] で Mie の単散乱の輝度（単位照度あたり）
     float3 multiScatAs1;      // f_ms の被積分量: ∫ T_view·σs dt（等方な単位入射光が散乱して戻る割合）
+    float3 multipleScattering;  // luminance のうち多重散乱の分 [sr⁻¹]（影の対象外。空気遠近法で単散乱と分けて持つ）
     float3 transmittance;     // カメラ → 積分区間の終端の透過率
+    float  opaqueShadowMean;  // 視線上の点（各区間の中点）で太陽が見える割合の平均（影なしなら 1。検証用）
 };
 
 // (1 − e^(−x)) / x を桁落ちなく計算する（x = σt·dt ≥ 0）。
@@ -85,7 +159,9 @@ ScatteringResult IntegrateScatteredLuminance(AtmosphereParameters a, AtmosphereL
     result.luminance = 0.0;
     result.mieSingleNoPhase = 0.0;
     result.multiScatAs1 = 0.0;
+    result.multipleScattering = 0.0;
     result.transmittance = 1.0;
+    result.opaqueShadowMean = 1.0;
 
     // 積分区間: 大気上端の内側から、地表に当たればそこまで
     float tTop0;
@@ -101,6 +177,11 @@ ScatteringResult IntegrateScatteredLuminance(AtmosphereParameters a, AtmosphereL
     if (RaySphere(origin, dir, a.bottomRadiusKm, tGround0, tGround1) && tGround0 > 0.0 && tGround0 < tEnd) {
         tEnd = tGround0;
         hitGround = true;
+    }
+    // 地形・ボクセルまでの距離で打ち切る（その手前で終わるなら、惑星の地表には当たらない）
+    if (s.maxDistanceKm < tEnd) {
+        tEnd = max(s.maxDistanceKm, tStart);
+        hitGround = false;
     }
 
     const float cosTheta = dot(dir, sunDir);
@@ -118,6 +199,7 @@ ScatteringResult IntegrateScatteredLuminance(AtmosphereParameters a, AtmosphereL
     const float range = tEnd - tStart;
     const float invSteps = 1.0 / float(s.stepCount);
     float3 throughput = 1.0;
+    float visibilitySum = 0.0;
     for (uint i = 0; i < s.stepCount; ++i) {
         const float u0 = float(i) * invSteps;
         const float u1 = float(i + 1) * invSteps;
@@ -131,14 +213,27 @@ ScatteringResult IntegrateScatteredLuminance(AtmosphereParameters a, AtmosphereL
         const float3 segmentTransmittance = exp(-m.extinction * dt);
 
         // 区間内の光源項 S [km⁻¹·sr⁻¹]: 単散乱（太陽の直達光）+ 多重散乱（式 (11)）
-        const float3 sunTransmittance = SunTransmittance(a, luts, s, p, sunDir);
+        float3 sunTransmittance = SunTransmittance(a, luts, s, p, sunDir);
+        // [POINT] 不透明物の影（参照実装の SHADOWMAP_ENABLED と同じ）: 単散乱の太陽光だけを遮る。多重散乱の項
+        //         （Ψ_ms は周りの空からの光）には掛けないので、影の中の空気はやや明るめになる（design.md §5.5）。
+        //         点の位置はカメラ相対 [m] で求める（惑星座標 [km] から戻すと float の精度が ~0.5 m に落ちる）。
+        float visibility = 1.0;
+        if (s.opaqueShadow.farSrv != kInvalidDescriptorIndex) {
+            const float tM = t * 1000.0;
+            visibility = SampleOpaqueShadow(s.opaqueShadow, dir * tM, s.opaqueShadowFilterRadiusPerM * tM,
+                                            float(i) * kGoldenAngle);
+            sunTransmittance *= visibility;
+        }
+        visibilitySum += visibility;
         const float3 mieNoPhase = m.mieScattering * sunTransmittance;  // [km⁻¹]
         float3 source = m.rayleighScattering * phaseRayleigh * sunTransmittance;
         if (!s.separateMiePhase) {
             source += mieNoPhase * phaseMie;
         }
+        float3 multipleSource = 0.0;
         if (s.multipleScattering) {
-            source += scattering * SampleMultipleScattering(a, luts, p, sunDir);
+            multipleSource = scattering * SampleMultipleScattering(a, luts, p, sunDir);
+            source += multipleSource;
         }
         // [POINT] 区間内で媒質が一定とみなした解析積分（Hillaire の "energy-conserving" 積分）:
         //           ∫₀^dt S·e^(−σt·x) dx = S·(1 − e^(−σt·dt)) / σt = S·dt·(1 − e^(−x))/x、x = σt·dt
@@ -148,6 +243,7 @@ ScatteringResult IntegrateScatteredLuminance(AtmosphereParameters a, AtmosphereL
         result.luminance += throughput * source * segmentWeight;
         result.mieSingleNoPhase += throughput * mieNoPhase * segmentWeight;
         result.multiScatAs1 += throughput * scattering * segmentWeight;
+        result.multipleScattering += throughput * multipleSource * segmentWeight;
         throughput *= segmentTransmittance;
     }
 
@@ -159,6 +255,7 @@ ScatteringResult IntegrateScatteredLuminance(AtmosphereParameters a, AtmosphereL
         result.luminance += throughput * sunT * saturate(dot(normal, sunDir)) * a.groundAlbedo / kPi;
     }
     result.transmittance = throughput;
+    result.opaqueShadowMean = visibilitySum * invSteps;
     return result;
 }
 

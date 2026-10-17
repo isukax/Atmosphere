@@ -55,23 +55,23 @@ uint32_t BindlessHeap::indexOf(D3D12_CPU_DESCRIPTOR_HANDLE handle) const
     return static_cast<uint32_t>((handle.ptr - m_heap->GetCPUDescriptorHandleForHeapStart().ptr) / m_stride);
 }
 
-void RtvPool::init(ID3D12Device* device, uint32_t capacity)
+void CpuDescriptorPool::init(ID3D12Device* device, uint32_t capacity, D3D12_DESCRIPTOR_HEAP_TYPE type)
 {
     D3D12_DESCRIPTOR_HEAP_DESC desc{};
-    desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+    desc.Type = type;
     desc.NumDescriptors = capacity;
-    check(device->CreateDescriptorHeap(&desc, IID_PPV_ARGS(&m_heap)), "CreateDescriptorHeap(rtv)");
-    m_stride = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+    check(device->CreateDescriptorHeap(&desc, IID_PPV_ARGS(&m_heap)), "CreateDescriptorHeap(cpu)");
+    m_stride = device->GetDescriptorHandleIncrementSize(type);
     m_free.clear();
     for (uint32_t i = capacity; i > 0; --i) {
         m_free.push_back(i - 1);
     }
 }
 
-D3D12_CPU_DESCRIPTOR_HANDLE RtvPool::allocate()
+D3D12_CPU_DESCRIPTOR_HANDLE CpuDescriptorPool::allocate()
 {
     if (m_free.empty()) {
-        throw std::runtime_error("RtvPool exhausted");
+        throw std::runtime_error("CpuDescriptorPool exhausted");
     }
     D3D12_CPU_DESCRIPTOR_HANDLE handle = m_heap->GetCPUDescriptorHandleForHeapStart();
     handle.ptr += static_cast<SIZE_T>(m_free.back()) * m_stride;
@@ -79,7 +79,7 @@ D3D12_CPU_DESCRIPTOR_HANDLE RtvPool::allocate()
     return handle;
 }
 
-void RtvPool::free(D3D12_CPU_DESCRIPTOR_HANDLE handle)
+void CpuDescriptorPool::free(D3D12_CPU_DESCRIPTOR_HANDLE handle)
 {
     if (handle.ptr == 0) {
         return;

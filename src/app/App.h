@@ -6,11 +6,16 @@
 #include "display/DisplayMonitor.h"
 #include "display/DisplayPass.h"
 #include "display/Swapchain.h"
+#include "gfx/GpuTimer.h"
 #include "gfx/Pipeline.h"
 #include "gfx/Texture.h"
+#include "render/SceneRenderer.h"
+#include "render/ShadowRenderer.h"
 #include "scene/Camera.h"
 #include "scene/TestPatternPass.h"
 #include "ui/ImGuiLayer.h"
+
+#include <imgui.h>
 
 #include <array>
 #include <chrono>
@@ -43,6 +48,10 @@ private:
     void updateCamera();
     void applyCoefficientSet(int index);
     void drawAtmosphereUi();
+    void drawPixelPickerUi(const ImVec2& pos, float width);
+    void drawGpuTimeUi(const ImVec2& pos, float width);
+    void drawEventsUi(const ImVec2& pos, float width);
+    void drawTextureViewUi(const ImVec2& pos);
     bool isSkyMode() const { return m_sceneMode != SceneMode::TestPattern; }
     void resetPathTraceIfChanged();
 
@@ -55,8 +64,13 @@ private:
     scene::TestPatternPass m_testPattern;
     std::unique_ptr<atmosphere::AtmosphereRenderer> m_atmosphereRenderer;
     std::unique_ptr<atmosphere::PathTracer> m_pathTracer;
+    std::unique_ptr<render::SceneRenderer> m_sceneRenderer;
+    std::unique_ptr<render::ShadowRenderer> m_shadowRenderer;
+    std::unique_ptr<gfx::GpuTimer> m_gpuTimer;
+    std::vector<gfx::GpuTimer::Result> m_gpuTimes;
 
     gfx::Texture m_sceneColor;  // RGBA16F、fb 値（露出済み）、linear 作業色空間
+    gfx::Texture m_depth;       // D32（Reverse-Z）、地形・球の深度。空気遠近法の合成で距離に戻す
     gfx::Texture m_uiTarget;    // R8G8B8A8_UNORM、sRGB 値、アルファ乗算済み
 
     // 設定（UI で変更）
@@ -76,6 +90,10 @@ private:
     atmosphere::AtmosphereQuality m_quality;  // LUT のステップ数・多重散乱の有無（既定値の理由は定義側）
     atmosphere::RaymarchSettings m_raymarch;
     bool m_sunDisk = true;
+    bool m_showScene = true;      // 地形・テスト球を描く（パストレースのモードでは描かない）
+    bool m_skyIrradiance = true;  // 地形に空からの拡散照度を加える
+    render::ShadowSettings m_shadow;  // 太陽のシャドウマップ（design.md §5.5）
+    atmosphere::AerialPerspectiveShadowOptions m_apShadow;  // 空気遠近法の影の方式（design.md §5.6）
     uint32_t m_pathTraceMaxDepth = 32;
     uint32_t m_pathTraceSamplesPerFrame = 1;
     std::vector<uint8_t> m_pathTraceKey;  // 累積をリセットすべき入力（カメラ・大気・設定）のバイト列

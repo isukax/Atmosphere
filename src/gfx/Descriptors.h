@@ -33,10 +33,10 @@ private:
     std::vector<uint32_t> m_free;
 };
 
-/// シェーダー非可視の RTV ヒープ。フリーリストで確保・解放する。
-class RtvPool {
+/// シェーダー非可視の RTV / DSV ヒープ。フリーリストで確保・解放する。
+class CpuDescriptorPool {
 public:
-    void init(ID3D12Device* device, uint32_t capacity);
+    void init(ID3D12Device* device, uint32_t capacity, D3D12_DESCRIPTOR_HEAP_TYPE type);
     D3D12_CPU_DESCRIPTOR_HANDLE allocate();
     void free(D3D12_CPU_DESCRIPTOR_HANDLE handle);
 

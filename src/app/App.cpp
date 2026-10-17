@@ -53,6 +53,9 @@ App::App(bool debugLayer)
     applyCoefficientSet(0);  // 先頭 = Hillaire2020（作業色空間の同期とログのため）
     m_atmosphereRenderer = std::make_unique<atmosphere::AtmosphereRenderer>(m_device, m_pipelines);
     m_pathTracer = std::make_unique<atmosphere::PathTracer>(m_device, m_pipelines);
+    m_sceneRenderer = std::make_unique<render::SceneRenderer>(m_device, m_pipelines);
+    m_shadowRenderer = std::make_unique<render::ShadowRenderer>(m_device);
+    m_gpuTimer = std::make_unique<gfx::GpuTimer>(m_device, gfx::Device::kFramesInFlight);
     m_pathTracer->resize(m_sceneColor.desc().width, m_sceneColor.desc().height);
 }
 
@@ -142,7 +145,8 @@ void App::createSizeDependentResources()
     const uint32_t h = std::max(m_window.height(), 1u);
     // [POINT] シーンカラーは RGBA16F。物理輝度ではなく露出済みの fb 値を入れるので FP16 で足りる
     //         （物理輝度のままだと太陽ディスク ~1.9×10⁹ cd/m² が FP16 の上限 65504 を超える）。
-    m_sceneColor = gfx::Texture(m_device, {w, h, DXGI_FORMAT_R16G16B16A16_FLOAT, true, true, false, L"SceneColor"});
+    m_sceneColor = gfx::Texture(m_device, {w, h, DXGI_FORMAT_R16G16B16A16_FLOAT, true, true, true, L"SceneColor"});
+    m_depth = gfx::Texture(m_device, {w, h, DXGI_FORMAT_D32_FLOAT, true, false, false, L"SceneDepth", 1, true});
     m_uiTarget = gfx::Texture(m_device, {w, h, ui::ImGuiLayer::kUiFormat, true, false, true, L"UiTarget"});
     if (m_pathTracer) {
         m_pathTracer->resize(w, h);
@@ -257,6 +261,10 @@ void App::renderFrame()
         }
     }
 
+    // [POINT] GPU 時間は、このスロットの前回のコマンドが完了した（beginFrame でフェンスを待った）ので読める
+    m_gpuTimes = m_gpuTimer->read(slot);
+    m_gpuTimer->beginFrame(slot);
+
     m_imgui->newFrame();
     updateCamera();
     drawUi();
@@ -269,10 +277,57 @@ void App::renderFrame()
         view.cameraPosKm = atmosphere::worldToPlanetKm(m_atmosphere, m_camera.positionM);
         view.exposureScale = exposureScale();
         view.sunDisk = m_sunDisk;
-        // [POINT] LUT の更新順: Transmittance（媒質が変わったとき）→ Multi-scattering（同）→ Sky-View（毎フレーム）。
-        //         後の LUT は前の LUT を読む。
+        view.apShadow = m_apShadow;
+        // [POINT] LUT の更新順: Transmittance（媒質が変わったとき）→ Multi-scattering（同）→ Sky-View（毎フレーム）
+        //         → 空気遠近法・空からの照度（毎フレーム）。後の LUT は前の LUT を読む。
+        uint32_t t = m_gpuTimer->begin(cmd, "LUTs (T, MS, Sky-View)");
         m_atmosphereRenderer->updateLuts(cmd, m_device.upload(), m_atmosphere, m_quality, view.cameraPosKm);
+        m_gpuTimer->end(cmd, t);
+
+        const bool drawScene = m_showScene && m_sceneMode != SceneMode::SkyPathTrace;
+        if (drawScene) {
+            // [POINT] シャドウマップは空気遠近法のボリュームと地形の描画の前に作る（どちらも引く）。
+            //         全体のカスケードは太陽の向きが変わったときだけ、近景は毎フレーム。
+            if (m_shadow.surface || m_shadow.aerialPerspective) {
+                t = m_gpuTimer->begin(cmd, "Shadow map (far)");
+                m_shadowRenderer->updateFar(cmd, m_device.upload(), *m_sceneRenderer, m_atmosphere.sunDirection());
+                m_gpuTimer->end(cmd, t);
+                t = m_gpuTimer->begin(cmd, "Shadow map (near)");
+                m_shadowRenderer->updateNear(cmd, m_device.upload(), *m_sceneRenderer, m_camera, aspect, m_shadow);
+                m_gpuTimer->end(cmd, t);
+            }
+            view.shadow = m_shadowRenderer->atmosphereShadow(m_camera.positionM, m_shadow);
+            t = m_gpuTimer->begin(cmd, "Aerial perspective volume");
+            m_atmosphereRenderer->updateAerialPerspective(cmd, m_device.upload(), m_atmosphere, view,
+                                                          m_quality.multipleScattering);
+            m_gpuTimer->end(cmd, t);
+            t = m_gpuTimer->begin(cmd, "Sky irradiance (SH)");
+            m_atmosphereRenderer->updateSkyIrradiance(cmd, m_device.upload(), m_atmosphere, view.cameraPosKm);
+            m_gpuTimer->end(cmd, t);
+
+            // 地形・球をシーンカラー（fb）と深度に描く
+            m_sceneColor.transition(cmd, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            m_depth.transition(cmd, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+            const float black[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+            cmd->ClearRenderTargetView(m_sceneColor.rtv(), black, 0, nullptr);
+            // [POINT] Reverse-Z: 深度のクリア値は 0（= 無限遠）。合成パスでは深度 0 のピクセルを空とみなす。
+            cmd->ClearDepthStencilView(m_depth.dsv(), D3D12_CLEAR_FLAG_DEPTH, 0.0f, 0, 0, nullptr);
+            render::SceneView sceneView;
+            sceneView.viewProjRot = m_camera.projection(aspect) * m_camera.viewRotation();
+            sceneView.cameraPosM = m_camera.positionM;
+            sceneView.exposureScale = exposureScale();
+            sceneView.skyIrradiance = m_skyIrradiance;
+            sceneView.shadow = m_shadowRenderer->sceneShadow(m_camera.positionM, m_shadow);
+            t = m_gpuTimer->begin(cmd, "Scene (terrain, spheres)");
+            m_sceneRenderer->record(cmd, m_device.upload(), m_sceneColor.rtv(), m_sceneColor.desc().format,
+                                    m_depth.dsv(), w, h, sceneView, m_atmosphere, *m_atmosphereRenderer);
+            m_gpuTimer->end(cmd, t);
+            m_depth.transition(cmd, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
+            view.depthSrv = m_depth.srvIndex();
+        }
+
         m_sceneColor.transition(cmd, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        t = m_gpuTimer->begin(cmd, "Sky / aerial perspective composite");
         switch (m_sceneMode) {
         case SceneMode::SkyLut:
             m_atmosphereRenderer->renderSkyFromLut(cmd, m_device.upload(), m_atmosphere, view,
@@ -291,6 +346,7 @@ void App::renderFrame()
                                  m_pathTraceMaxDepth, m_pathTraceSamplesPerFrame, m_sceneColor.uavIndex());
             break;
         }
+        m_gpuTimer->end(cmd, t);
     } else {
         m_sceneColor.transition(cmd, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         m_testPattern.record(cmd, m_device.upload(), m_sceneColor.uavIndex(), w, h, exposureScale(), m_workingSpace,
@@ -333,10 +389,13 @@ void App::renderFrame()
     input.uiWhiteNits = m_uiWhiteNits;
     input.frameIndex = static_cast<uint32_t>(m_device.frameNumber());
     m_swapchain->transition(cmd, D3D12_RESOURCE_STATE_RENDER_TARGET);
+    const uint32_t displayTimer = m_gpuTimer->begin(cmd, "Display (GT7, encode, UI)");
     m_displayPass.record(cmd, m_device.upload(), m_swapchain->rtv(), m_swapchain->format(), m_swapchain->width(),
                          m_swapchain->height(), input);
+    m_gpuTimer->end(cmd, displayTimer);
     m_swapchain->transition(cmd, D3D12_RESOURCE_STATE_PRESENT);
 
+    m_gpuTimer->resolve(cmd);
     m_device.endFrame();
     m_swapchain->present(m_vsync);
 }
@@ -399,8 +458,30 @@ void App::drawUi()
     if (isSkyMode()) {
         drawAtmosphereUi();
     }
+    ImGui::End();
 
-    if (ImGui::CollapsingHeader("Pixel picker", ImGuiTreeNodeFlags_DefaultOpen) && m_pickedX >= 0) {
+    // 情報表示はパラメーター設定と別ウインドウにする（既定配置: 画面右側に縦に並べる）
+    const float infoWidth = 460.0f;
+    const float infoX = std::max(10.0f, ImGui::GetIO().DisplaySize.x - infoWidth - 10.0f);
+    drawPixelPickerUi(ImVec2(infoX, 10.0f), infoWidth);
+    drawGpuTimeUi(ImVec2(infoX, 140.0f), infoWidth);
+    drawEventsUi(ImVec2(infoX, 420.0f), infoWidth);
+    if (isSkyMode()) {
+        drawTextureViewUi(ImVec2(460.0f, 10.0f));
+    }
+}
+
+void App::drawPixelPickerUi(const ImVec2& pos, float width)
+{
+    ImGui::SetNextWindowPos(pos, ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(width, 0), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin("Pixel Picker")) {
+        ImGui::End();
+        return;
+    }
+    if (m_pickedX < 0) {
+        ImGui::TextDisabled("Hover the scene to pick a pixel");
+    } else {
         // [POINT] ピッカーで単位の流れを確認できるようにする:
         //         シーン輝度 [cd/m²] → 露出 → fb → GT7 → 表示輝度 [nit]（HDR）/ SDR 白に対する割合（SDR）
         const glm::vec3 fb(m_pickedFb[0], m_pickedFb[1], m_pickedFb[2]);
@@ -419,8 +500,32 @@ void App::drawUi()
                         mappedY * display::kGTSdrPaperWhiteNits);
         }
     }
+    ImGui::End();
+}
 
-    if (ImGui::CollapsingHeader("Events")) {
+void App::drawGpuTimeUi(const ImVec2& pos, float width)
+{
+    ImGui::SetNextWindowPos(pos, ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(width, 0), ImGuiCond_FirstUseEver);
+    if (ImGui::Begin("GPU Time")) {
+        // 前回このフレームスロットで記録した値（Debug ビルドの値は参考。V8 は Release で測る）
+        double total = 0.0;
+        for (const gfx::GpuTimer::Result& r : m_gpuTimes) {
+            ImGui::Text("%-36s %7.3f ms", r.name.c_str(), r.milliseconds);
+            total += r.milliseconds;
+        }
+        ImGui::Separator();
+        ImGui::Text("%-36s %7.3f ms", "Total (measured passes)", total);
+    }
+    ImGui::End();
+}
+
+void App::drawEventsUi(const ImVec2& pos, float width)
+{
+    ImGui::SetNextWindowPos(pos, ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(width, 200.0f), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowCollapsed(true, ImGuiCond_FirstUseEver);
+    if (ImGui::Begin("Events")) {
         for (const std::string& e : m_events) {
             ImGui::TextUnformatted(e.c_str());
         }
@@ -476,6 +581,46 @@ void App::drawAtmosphereUi()
         }
 
         ImGui::Checkbox("Sun disk", &m_sunDisk);
+        ImGui::SeparatorText("Scene");
+        ImGui::Checkbox("Terrain & spheres", &m_showScene);
+        ImGui::SameLine();
+        ImGui::TextDisabled("(not in path trace mode)");
+        ImGui::Checkbox("Sky irradiance (SH)", &m_skyIrradiance);
+        ImGui::SliderFloat("Terrain albedo", &m_sceneRenderer->terrainAlbedo, 0.0f, 1.0f, "%.2f");
+        if (ImGui::TreeNode("Sun shadow (shadow map)")) {
+            ImGui::Checkbox("Surface (terrain, spheres)", &m_shadow.surface);
+            ImGui::Checkbox("Aerial perspective (single scattering)", &m_shadow.aerialPerspective);
+            ImGui::Checkbox("Near cascade", &m_shadow.nearCascade);
+            ImGui::SliderFloat("Near range [m]", &m_shadow.nearRangeM, 20.0f, 5000.0f, "%.0f",
+                               ImGuiSliderFlags_Logarithmic);
+            ImGui::SliderFloat("Normal offset [texels]", &m_shadow.normalOffsetTexels, 0.0f, 4.0f, "%.2f");
+            ImGui::SliderFloat("Cascade blend band", &m_shadow.blendBand, 0.01f, 0.5f, "%.2f");
+            // 空気遠近法の影の方式（design.md §5.6）
+            int method = static_cast<int>(m_apShadow.method);
+            if (ImGui::Combo("AP shadow method", &method,
+                             "0: Volume (point)\0" "1: Volume (filtered to voxel)\0" "5: Per pixel (shadowed segments)\0")) {
+                m_apShadow.method = static_cast<atmosphere::AerialPerspectiveShadowMethod>(method);
+            }
+            if (m_apShadow.method == atmosphere::AerialPerspectiveShadowMethod::VolumeFiltered) {
+                ImGui::SliderFloat("Filter radius scale", &m_apShadow.filterScale, 0.25f, 4.0f, "%.2f");
+            }
+            if (m_apShadow.method == atmosphere::AerialPerspectiveShadowMethod::PerPixel) {
+                int steps = static_cast<int>(m_apShadow.perPixelSteps);
+                if (ImGui::SliderInt("Per-pixel steps", &steps, 4, 128)) {
+                    m_apShadow.perPixelSteps = static_cast<uint32_t>(steps);
+                }
+                int bisect = static_cast<int>(m_apShadow.perPixelBisectSteps);
+                if (ImGui::SliderInt("Bisection steps", &bisect, 0, 12)) {
+                    m_apShadow.perPixelBisectSteps = static_cast<uint32_t>(bisect);
+                }
+            }
+            const glm::dvec2 nearTexel = m_shadowRenderer->nearCascade().texelSizeM();
+            const glm::dvec2 farTexel = m_shadowRenderer->farCascade().texelSizeM();
+            ImGui::Text("Texel: near %.2f x %.2f m, far %.1f x %.1f m", nearTexel.x, nearTexel.y, farTexel.x,
+                        farTexel.y);
+            ImGui::TextDisabled("Sky pixels: no light shafts (design.md 5.5)");
+            ImGui::TreePop();
+        }
         ImGui::SliderFloat3("Ground albedo", &m_atmosphere.groundAlbedo.x, 0.0f, 1.0f, "%.2f");
 
         ImGui::SeparatorText("Quality");
@@ -511,7 +656,18 @@ void App::drawAtmosphereUi()
                 m_pathTracer->reset();
             }
         }
+    }
+}
 
+void App::drawTextureViewUi(const ImVec2& pos)
+{
+    ImGui::SetNextWindowPos(pos, ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(420.0f, 0), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin("LUTs / Shadow maps")) {
+        ImGui::End();
+        return;
+    }
+    {
         ImGui::SeparatorText("Transmittance LUT (256x64)");
         // 横軸: 大気上端までの距離（左 = 真上、右 = 地平線）、縦軸: 高度（上 = 地表、下 = 大気上端）
         const gfx::Texture& lut = m_atmosphereRenderer->transmittanceLut();
@@ -527,7 +683,17 @@ void App::drawAtmosphereUi()
         const gfx::Texture& svMie = m_atmosphereRenderer->skyViewMieLut();
         ImGui::Image(static_cast<ImTextureID>(m_device.bindless().gpu(svMie.srvIndex()).ptr), ImVec2(192.0f, 108.0f));
         ImGui::TextDisabled("Sky-View Mie LUT (single scattering without phase, x p_M per pixel)");
+
+        ImGui::SeparatorText("Sun shadow maps");
+        // シャドウマップ（深度、R に表示。明るいほど太陽に近い）
+        ImGui::Image(static_cast<ImTextureID>(m_device.bindless().gpu(m_shadowRenderer->nearMap().srvIndex()).ptr),
+                     ImVec2(160.0f, 160.0f));
+        ImGui::SameLine();
+        ImGui::Image(static_cast<ImTextureID>(m_device.bindless().gpu(m_shadowRenderer->farMap().srvIndex()).ptr),
+                     ImVec2(160.0f, 160.0f));
+        ImGui::TextDisabled("left: near cascade, right: far cascade (depth, brighter = closer to the sun)");
     }
+    ImGui::End();
 }
 
 } // namespace app

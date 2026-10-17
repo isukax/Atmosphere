@@ -68,8 +68,17 @@ AtmosphereRenderer::AtmosphereRenderer(gfx::Device& device, const gfx::PipelineL
       m_multiScatteringLut(device, {kMultiScatteringSize, kMultiScatteringSize, lutFormat, true, true, false,
                                     L"MultiScatteringLut"}),
       m_skyViewLut(device, {kSkyViewWidth, kSkyViewHeight, lutFormat, true, true, false, L"SkyViewLut"}),
-      m_skyViewMieLut(device, {kSkyViewWidth, kSkyViewHeight, lutFormat, true, true, false, L"SkyViewMieLut"})
+      m_skyViewMieLut(device, {kSkyViewWidth, kSkyViewHeight, lutFormat, true, true, false, L"SkyViewMieLut"}),
+      m_aerialPerspective(device, {kAerialPerspectiveSize, kAerialPerspectiveSize, lutFormat, true, true, false,
+                                   L"AerialPerspective", kAerialPerspectiveSize}),
+      m_aerialPerspectiveMie(device, {kAerialPerspectiveSize, kAerialPerspectiveSize, lutFormat, true, true, false,
+                                      L"AerialPerspectiveMie", kAerialPerspectiveSize}),
+      m_aerialPerspectiveMs(device, {kAerialPerspectiveSize, kAerialPerspectiveSize, lutFormat, true, true, false,
+                                     L"AerialPerspectiveMultiple", kAerialPerspectiveSize}),
+      m_skyIrradiance(device, {9 * 16, 16, true, true, L"SkyIrradianceSH"})
 {
+    m_aerialPerspectivePso = pipelines.createCompute("AerialPerspective_cs");
+    m_skyIrradiancePso = pipelines.createCompute("SkyIrradiance_cs");
 }
 
 bool AtmosphereRenderer::updateTransmittanceLut(ID3D12GraphicsCommandList* cmd, gfx::UploadRing& upload,
@@ -176,6 +185,25 @@ SkyPassConstants AtmosphereRenderer::makeSkyPassConstants(const AtmosphereParams
     c.sunTransmittanceMode = static_cast<uint32_t>(SunTransmittanceMode::Lut);
     c.accumulationUavA = gfx::kInvalidDescriptorIndex;
     c.accumulationUavB = gfx::kInvalidDescriptorIndex;
+    c.skyIrradianceUav = m_skyIrradiance.uavIndex();
+    c.aerialPerspectiveUav = m_aerialPerspective.uavIndex();
+    c.aerialPerspectiveMieUav = m_aerialPerspectiveMie.uavIndex();
+    c.aerialPerspectiveSrv = m_aerialPerspective.srvIndex();
+    c.aerialPerspectiveMieSrv = m_aerialPerspectiveMie.srvIndex();
+    c.depthSrv = view.depthSrv;
+    c.apKmPerSlice = kAerialPerspectiveKmPerSlice;
+    c.apSliceCount = static_cast<float>(kAerialPerspectiveSize);
+    c.raymarchMeanTransmittance = 0;
+    storeRowMajor(c.shadowFarToUvz, view.shadow.cameraRelativeToUvz);
+    c.shadowFarSrv = view.shadow.mapSrv;
+    storeRowMajor(c.shadowNearToUvz, view.shadow.nearCameraRelativeToUvz);
+    c.shadowNearSrv = view.shadow.valid() ? view.shadow.nearMapSrv : gfx::kInvalidDescriptorIndex;
+    c.apShadowMethod = static_cast<uint32_t>(view.apShadow.method);
+    c.apPerPixelSteps = view.apShadow.perPixelSteps;
+    c.apShadowFilterScale = view.apShadow.filterScale;
+    c.apPerPixelBisectSteps = view.apShadow.perPixelBisectSteps;
+    c.aerialPerspectiveMsUav = m_aerialPerspectiveMs.uavIndex();
+    c.aerialPerspectiveMsSrv = m_aerialPerspectiveMs.srvIndex();
     return c;
 }
 
@@ -235,7 +263,42 @@ void AtmosphereRenderer::renderSkyRaymarch(ID3D12GraphicsCommandList* cmd, gfx::
     if (settings.multipleScattering) {
         c.flags |= kSkyFlagMultipleScattering;
     }
+    c.raymarchMeanTransmittance = settings.meanTransmittance ? 1u : 0u;
     dispatchSkyPass(cmd, upload, m_raymarchPso.Get(), c, width, height);
+}
+
+void AtmosphereRenderer::updateAerialPerspective(ID3D12GraphicsCommandList* cmd, gfx::UploadRing& upload,
+                                                 const AtmosphereParams& params, const SkyView& view,
+                                                 bool multipleScattering)
+{
+    SkyPassConstants c = makeSkyPassConstants(params, view, gfx::kInvalidDescriptorIndex, kAerialPerspectiveSize,
+                                              kAerialPerspectiveSize);
+    c.flags = multipleScattering ? kSkyFlagMultipleScattering : 0u;
+    m_aerialPerspective.transition(cmd, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    m_aerialPerspectiveMie.transition(cmd, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    m_aerialPerspectiveMs.transition(cmd, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    cmd->SetComputeRootSignature(m_pipelines.rootSignature());
+    cmd->SetPipelineState(m_aerialPerspectivePso.Get());
+    cmd->SetComputeRootConstantBufferView(gfx::PipelineLibrary::kRootPassConstants, upload.push(c));
+    constexpr uint32_t groups = kAerialPerspectiveSize / 4;  // numthreads(4, 4, 4)
+    cmd->Dispatch(groups, groups, groups);
+    m_aerialPerspective.transition(cmd, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
+    m_aerialPerspectiveMie.transition(cmd, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
+    m_aerialPerspectiveMs.transition(cmd, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
+}
+
+void AtmosphereRenderer::updateSkyIrradiance(ID3D12GraphicsCommandList* cmd, gfx::UploadRing& upload,
+                                             const AtmosphereParams& params, const glm::vec3& cameraPosKm)
+{
+    SkyView view;
+    view.cameraPosKm = cameraPosKm;
+    const SkyPassConstants c = makeSkyPassConstants(params, view, gfx::kInvalidDescriptorIndex, 1, 1);
+    m_skyIrradiance.transition(cmd, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    cmd->SetComputeRootSignature(m_pipelines.rootSignature());
+    cmd->SetPipelineState(m_skyIrradiancePso.Get());
+    cmd->SetComputeRootConstantBufferView(gfx::PipelineLibrary::kRootPassConstants, upload.push(c));
+    cmd->Dispatch(1, 1, 1);
+    m_skyIrradiance.transition(cmd, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
 }
 
 } // namespace atmosphere

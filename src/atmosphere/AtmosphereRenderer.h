@@ -1,7 +1,9 @@
 #pragma once
 
 #include "atmosphere/AtmosphereParams.h"
+#include "atmosphere/ShadowInput.h"
 #include "atmosphere/SkyPassConstants.h"
+#include "gfx/Buffer.h"
 #include "gfx/Pipeline.h"
 #include "gfx/Texture.h"
 
@@ -45,6 +47,7 @@ struct RaymarchSettings {
     SunTransmittanceMode sunMode = SunTransmittanceMode::Lut;
     uint32_t nestedSteps = 64;
     bool multipleScattering = true;
+    bool meanTransmittance = false;  // 地形に掛ける透過率を RGB 平均にする（V3c の比較用）
 };
 
 /// 空を描くときの視点・出力。
@@ -55,6 +58,11 @@ struct SkyView {
     RaymarchOutput output = RaymarchOutput::CameraFb;
     uint32_t directionUav = gfx::kInvalidDescriptorIndex;  // TestPerLux のときの方向出力（不要なら無効値）
     bool sunDisk = true;
+    uint32_t depthSrv = gfx::kInvalidDescriptorIndex;  // 深度バッファ（地形があるとき）。空気遠近法を掛ける
+    /// 地形の影（空気遠近法と、レイマーチの地形のピクセルの単散乱に掛ける）。既定は影なし
+    ShadowInput shadow;
+    /// 空気遠近法の影の方式（design.md §5.6）。updateAerialPerspective と renderSkyFromLut で同じ値を渡すこと
+    AerialPerspectiveShadowOptions apShadow;
 };
 
 /// 大気の LUT 生成と空の描画。Shoga へ移植する単位。
@@ -66,6 +74,8 @@ public:
     static constexpr uint32_t kMultiScatteringSize = 32;
     static constexpr uint32_t kSkyViewWidth = 192;
     static constexpr uint32_t kSkyViewHeight = 108;
+    static constexpr uint32_t kAerialPerspectiveSize = 32;   // 32×32×32
+    static constexpr float kAerialPerspectiveKmPerSlice = 4.0f;  // スライス座標 1 あたりの距離（参照実装と同じ）
 
     /// `lutFormat`: 実用は RGBA16F。数値検証では RGBA32F（格納の丸めを測らないため）。
     AtmosphereRenderer(gfx::Device& device, const gfx::PipelineLibrary& pipelines,
@@ -87,6 +97,12 @@ public:
     /// 3 つの LUT をまとめて更新する（対話モード用）。
     void updateLuts(ID3D12GraphicsCommandList* cmd, gfx::UploadRing& upload, const AtmosphereParams& params,
                     const AtmosphereQuality& quality, const glm::vec3& cameraPosKm);
+    /// 空気遠近法のボリューム（カメラの視錐台）。毎フレーム作る。Sky-View LUT と同じく LUT 3 枚の後に呼ぶ。
+    void updateAerialPerspective(ID3D12GraphicsCommandList* cmd, gfx::UploadRing& upload,
+                                 const AtmosphereParams& params, const SkyView& view, bool multipleScattering);
+    /// 空からの拡散照度（SH 係数）。Sky-View LUT の後に呼ぶ。
+    void updateSkyIrradiance(ID3D12GraphicsCommandList* cmd, gfx::UploadRing& upload, const AtmosphereParams& params,
+                             const glm::vec3& cameraPosKm);
 
     /// Sky-View LUT から空を描く（実用パス）。`outputUav` は UNORDERED_ACCESS 状態であること。
     void renderSkyFromLut(ID3D12GraphicsCommandList* cmd, gfx::UploadRing& upload, const AtmosphereParams& params,
@@ -95,6 +111,13 @@ public:
     void renderSkyRaymarch(ID3D12GraphicsCommandList* cmd, gfx::UploadRing& upload, const AtmosphereParams& params,
                            const SkyView& view, const RaymarchSettings& settings, uint32_t outputUav,
                            uint32_t width, uint32_t height);
+
+    /// 次の update で Transmittance / Multi-scattering LUT を必ず作り直させる（性能計測用）。
+    void invalidateLuts()
+    {
+        m_transmittanceParams.reset();
+        m_multiScatteringParams.reset();
+    }
 
     /// 空のパス共通の定数（パストレーサーも使う）。LUT のインデックス・サイズを埋める。
     SkyPassConstants makeSkyPassConstants(const AtmosphereParams& params, const SkyView& view, uint32_t outputUav,
@@ -105,6 +128,11 @@ public:
     gfx::Texture& skyViewLut() { return m_skyViewLut; }
     /// Sky-View LUT の 2 枚目: Mie の単散乱から位相関数を除いた積分（描画時に p_M(θ) を掛ける）
     gfx::Texture& skyViewMieLut() { return m_skyViewMieLut; }
+    gfx::Texture& aerialPerspective() { return m_aerialPerspective; }
+    gfx::Texture& aerialPerspectiveMie() { return m_aerialPerspectiveMie; }
+    gfx::Texture& aerialPerspectiveMultiple() { return m_aerialPerspectiveMs; }
+    /// 空からの照度の SH 係数（9 × float4、単位照度あたり、余弦の畳み込み済み）
+    gfx::Buffer& skyIrradiance() { return m_skyIrradiance; }
 
 private:
     void dispatchSkyPass(ID3D12GraphicsCommandList* cmd, gfx::UploadRing& upload, ID3D12PipelineState* pso,
@@ -116,10 +144,16 @@ private:
     ComPtr<ID3D12PipelineState> m_skyViewPso;
     ComPtr<ID3D12PipelineState> m_skyFromLutPso;
     ComPtr<ID3D12PipelineState> m_raymarchPso;
+    ComPtr<ID3D12PipelineState> m_aerialPerspectivePso;
+    ComPtr<ID3D12PipelineState> m_skyIrradiancePso;
     gfx::Texture m_transmittanceLut;
     gfx::Texture m_multiScatteringLut;
     gfx::Texture m_skyViewLut;     // Rayleigh の単散乱 + 多重散乱 [sr⁻¹]
     gfx::Texture m_skyViewMieLut;  // Mie の単散乱（位相関数なし）[無次元]
+    gfx::Texture m_aerialPerspective;     // 3D: Rayleigh の単散乱の内散乱 [sr⁻¹]、A = 平均透過率
+    gfx::Texture m_aerialPerspectiveMie;  // 3D: Mie の単散乱（位相関数なし）[無次元]
+    gfx::Texture m_aerialPerspectiveMs;   // 3D: 多重散乱の内散乱 [sr⁻¹]（影の対象外。design.md §5.6）
+    gfx::Buffer m_skyIrradiance;          // SH 係数 9 × float4
 
     std::optional<AtmosphereGpu> m_transmittanceParams;
     uint32_t m_transmittanceSteps = 0;

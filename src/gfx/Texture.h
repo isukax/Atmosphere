@@ -14,9 +14,11 @@ struct TextureDesc {
     bool uav = false;
     bool rtv = false;
     const wchar_t* name = L"Texture";
+    uint32_t depth = 1;  // > 1 なら 3D テクスチャ
+    bool dsv = false;    // 深度バッファ（format は DXGI_FORMAT_D32_FLOAT のみ対応）
 };
 
-/// 2D テクスチャと、その Bindless SRV/UAV インデックス・RTV ハンドルを所有する。
+/// 2D / 3D テクスチャと、その Bindless SRV/UAV インデックス・RTV/DSV ハンドルを所有する。
 /// 状態は 1 つだけ追跡する（サブリソース単位の追跡はしない）。
 class Texture {
 public:
@@ -34,6 +36,7 @@ public:
     uint32_t srvIndex() const { return m_srvIndex; }
     uint32_t uavIndex() const { return m_uavIndex; }
     D3D12_CPU_DESCRIPTOR_HANDLE rtv() const { return m_rtv; }
+    D3D12_CPU_DESCRIPTOR_HANDLE dsv() const { return m_dsv; }
 
     /// 現在の状態から `to` へのバリアを記録する（同じなら何もしない）。
     void transition(ID3D12GraphicsCommandList* cmd, D3D12_RESOURCE_STATES to);
@@ -53,6 +56,7 @@ private:
     uint32_t m_srvIndex = kInvalidDescriptorIndex;
     uint32_t m_uavIndex = kInvalidDescriptorIndex;
     D3D12_CPU_DESCRIPTOR_HANDLE m_rtv{};
+    D3D12_CPU_DESCRIPTOR_HANDLE m_dsv{};
 };
 
 /// バッファ 1 本をコマンドリストのバリアなしで作る小さなヘルパー（アップロード・リードバック用）。

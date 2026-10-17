@@ -68,6 +68,8 @@ void CSMain(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
     settings.groundRadiance = true;
     settings.uniformSteps = gUniformSteps != 0;
     settings.separateMiePhase = false;
+    settings.maxDistanceKm = kNoDistanceLimitKm;
+    DisableOpaqueShadow(settings);
     const ScatteringResult result = IntegrateScatteredLuminance(gAtmosphere, luts, settings, origin, dir, sunDir);
 
     gsLuminance[directionIndex] = result.luminance;

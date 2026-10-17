@@ -32,16 +32,6 @@ float SampleFreeFlight(inout Rng rng, float majorantPerKm)
     return -log(1.0 - NextFloat(rng)) / majorantPerKm;
 }
 
-// n を z 軸とする正規直交基底（Duff et al. 2017）
-void OrthonormalBasis(float3 n, out float3 b1, out float3 b2)
-{
-    const float s = n.z >= 0.0 ? 1.0 : -1.0;
-    const float a = -1.0 / (s + n.z);
-    const float b = n.x * n.y * a;
-    b1 = float3(1.0 + s * n.x * n.x * a, s * b, -s * n.x);
-    b2 = float3(b, s + n.y * n.y * a, -n.y);
-}
-
 float3 SampleUniformSphere(inout Rng rng)
 {
     const float z = 1.0 - 2.0 * NextFloat(rng);

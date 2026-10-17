@@ -26,13 +26,16 @@ ComPtr<ID3D12Resource> createBuffer(ID3D12Device* device, uint64_t bytes, D3D12_
 Texture::Texture(Device& device, const TextureDesc& desc)
     : m_device(&device), m_desc(desc)
 {
+    const bool volume = desc.depth > 1;
     D3D12_RESOURCE_DESC rd{};
-    rd.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    rd.Dimension = volume ? D3D12_RESOURCE_DIMENSION_TEXTURE3D : D3D12_RESOURCE_DIMENSION_TEXTURE2D;
     rd.Width = desc.width;
     rd.Height = desc.height;
-    rd.DepthOrArraySize = 1;
+    rd.DepthOrArraySize = static_cast<UINT16>(desc.depth);
     rd.MipLevels = 1;
-    rd.Format = desc.format;
+    // [POINT] 深度バッファをシェーダーからも読む（空気遠近法の合成で距離を求める）ので、
+    //         リソースは R32_TYPELESS で作り、DSV は D32_FLOAT、SRV は R32_FLOAT として見る。
+    rd.Format = desc.dsv ? DXGI_FORMAT_R32_TYPELESS : desc.format;
     rd.SampleDesc.Count = 1;
     if (desc.uav) {
         rd.Flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
@@ -40,16 +43,38 @@ Texture::Texture(Device& device, const TextureDesc& desc)
     if (desc.rtv) {
         rd.Flags |= D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
     }
+    if (desc.dsv) {
+        rd.Flags |= D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+    }
     D3D12_HEAP_PROPERTIES heap{D3D12_HEAP_TYPE_DEFAULT};
     m_state = D3D12_RESOURCE_STATE_COMMON;
-    check(device.d3d()->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &rd, m_state, nullptr,
-                                                IID_PPV_ARGS(&m_resource)),
+    D3D12_CLEAR_VALUE depthClear{};
+    depthClear.Format = DXGI_FORMAT_D32_FLOAT;
+    depthClear.DepthStencil.Depth = 0.0f;  // Reverse-Z: 無限遠 = 0
+    check(device.d3d()->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &rd, m_state,
+                                                desc.dsv ? &depthClear : nullptr, IID_PPV_ARGS(&m_resource)),
           "CreateCommittedResource(texture)");
     m_resource->SetName(desc.name);
 
     if (desc.srv) {
         m_srvIndex = device.bindless().allocate();
-        device.d3d()->CreateShaderResourceView(m_resource.Get(), nullptr, device.bindless().cpu(m_srvIndex));
+        if (desc.dsv) {
+            D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+            srv.Format = DXGI_FORMAT_R32_FLOAT;
+            srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+            srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            srv.Texture2D.MipLevels = 1;
+            device.d3d()->CreateShaderResourceView(m_resource.Get(), &srv, device.bindless().cpu(m_srvIndex));
+        } else {
+            device.d3d()->CreateShaderResourceView(m_resource.Get(), nullptr, device.bindless().cpu(m_srvIndex));
+        }
+    }
+    if (desc.dsv) {
+        m_dsv = device.dsvPool().allocate();
+        D3D12_DEPTH_STENCIL_VIEW_DESC dsvDesc{};
+        dsvDesc.Format = DXGI_FORMAT_D32_FLOAT;
+        dsvDesc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
+        device.d3d()->CreateDepthStencilView(m_resource.Get(), &dsvDesc, m_dsv);
     }
     if (desc.uav) {
         m_uavIndex = device.bindless().allocate();
@@ -82,10 +107,12 @@ Texture& Texture::operator=(Texture&& other) noexcept
         m_srvIndex = other.m_srvIndex;
         m_uavIndex = other.m_uavIndex;
         m_rtv = other.m_rtv;
+        m_dsv = other.m_dsv;
         other.m_device = nullptr;
         other.m_srvIndex = kInvalidDescriptorIndex;
         other.m_uavIndex = kInvalidDescriptorIndex;
         other.m_rtv = {};
+        other.m_dsv = {};
     }
     return *this;
 }
@@ -101,9 +128,11 @@ void Texture::release()
     m_device->bindless().free(m_srvIndex);
     m_device->bindless().free(m_uavIndex);
     m_device->rtvPool().free(m_rtv);
+    m_device->dsvPool().free(m_dsv);
     m_srvIndex = kInvalidDescriptorIndex;
     m_uavIndex = kInvalidDescriptorIndex;
     m_rtv = {};
+    m_dsv = {};
     m_resource.Reset();
     m_device = nullptr;
 }
@@ -175,13 +204,18 @@ std::vector<uint8_t> Texture::readback(Device& device, uint32_t bytesPerPixel)
         cmd->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
     });
 
-    std::vector<uint8_t> out(static_cast<size_t>(m_desc.width) * m_desc.height * bytesPerPixel);
+    // 3D テクスチャはスライス z ごとに height 行（出力は z, y, x の順に詰める）
+    const uint32_t depth = m_desc.depth;
+    std::vector<uint8_t> out(static_cast<size_t>(m_desc.width) * m_desc.height * depth * bytesPerPixel);
     uint8_t* mapped = nullptr;
     check(staging->Map(0, nullptr, reinterpret_cast<void**>(&mapped)), "Map(readback)");
     const uint32_t rowBytes = m_desc.width * bytesPerPixel;
-    for (uint32_t y = 0; y < m_desc.height; ++y) {
-        std::memcpy(out.data() + static_cast<size_t>(y) * rowBytes,
-                    mapped + footprint.Offset + static_cast<size_t>(y) * footprint.Footprint.RowPitch, rowBytes);
+    for (uint32_t z = 0; z < depth; ++z) {
+        for (uint32_t y = 0; y < m_desc.height; ++y) {
+            const size_t row = static_cast<size_t>(z) * m_desc.height + y;
+            std::memcpy(out.data() + row * rowBytes,
+                        mapped + footprint.Offset + row * footprint.Footprint.RowPitch, rowBytes);
+        }
     }
     staging->Unmap(0, nullptr);
     return out;

@@ -44,6 +44,8 @@ void CSMain(uint3 id : SV_DispatchThreadID)
     settings.groundRadiance = false;
     settings.uniformSteps = false;
     settings.separateMiePhase = true;
+    settings.maxDistanceKm = kNoDistanceLimitKm;
+    DisableOpaqueShadow(settings);  // 空の光芒は扱わない（design.md §5.5、§12 Q14）
     const ScatteringResult result = IntegrateScatteredLuminance(gAtmosphere, LoadAtmosphereLuts(), settings,
                                                                 float3(0.0, r, 0.0), viewDir, sunDir);
     RWTexture2D<float4> output = ResourceDescriptorHeap[gOutputUav];

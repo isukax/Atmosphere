@@ -144,7 +144,8 @@ Device::Device(bool debugLayer)
     m_fenceEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
 
     m_bindless.init(m_device.Get(), 4096);
-    m_rtvPool.init(m_device.Get(), 64);
+    m_rtvPool.init(m_device.Get(), 64, D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+    m_dsvPool.init(m_device.Get(), 16, D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
     m_upload.init(m_device.Get(), 1u << 20, kFramesInFlight);
 }
 

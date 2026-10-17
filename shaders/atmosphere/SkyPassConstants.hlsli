@@ -11,6 +11,11 @@
 #define SKY_FLAG_MULTIPLE_SCATTERING 1u
 #define SKY_FLAG_SUN_DISK 2u
 
+// 空気遠近法の影の方式（design.md §5.6）
+#define AP_SHADOW_VOLUME_POINT 0     // 0: ボリュームの積分で 1 回の比較
+#define AP_SHADOW_VOLUME_FILTERED 1  // 1: ボリュームの積分で、ボクセルの横幅の円盤をぼかして引く
+#define AP_SHADOW_PER_PIXEL 2        // 5: ボリュームは影なし。合成でピクセルごとに影の区間を差し引く
+
 cbuffer SkyPassConstants : register(b0)
 {
     AtmosphereParameters gAtmosphere   : packoffset(c0);   // c0-c5
@@ -41,7 +46,44 @@ cbuffer SkyPassConstants : register(b0)
     uint   gAccumulationUavB           : packoffset(c18.x); // パストレーサー: 累積（奇数フレーム）
     uint   gSkyViewMieLutUav           : packoffset(c18.y); // Sky-View LUT の生成: Mie の単散乱（位相関数なし）の出力
     uint   gSkyViewMieLutSrv           : packoffset(c18.z); // LUT からの描画: 同じ LUT を読む
+    uint   gSkyIrradianceUav           : packoffset(c19.w); // 空からの照度の SH 係数（9 × float4）の出力
+    uint   gAerialPerspectiveUav       : packoffset(c20.x); // 空気遠近法のボリューム（Rayleigh + 多重散乱、A = 平均透過率）
+    uint   gAerialPerspectiveMieUav    : packoffset(c20.y); // 空気遠近法のボリューム（Mie の単散乱、位相関数なし）
+    uint   gAerialPerspectiveSrv       : packoffset(c20.z);
+    uint   gAerialPerspectiveMieSrv    : packoffset(c20.w);
+    uint   gDepthSrv                   : packoffset(c21.x); // 深度バッファ（Reverse-Z）。無効値なら地形なし
+    float  gApKmPerSlice               : packoffset(c21.y); // 空気遠近法のスライスの距離単位 [km]（参照実装と同じ 4）
+    float  gApSliceCount               : packoffset(c21.z); // 32
+    uint   gRaymarchMeanTransmittance  : packoffset(c21.w); // レイマーチで地形に掛ける透過率を RGB 平均にする（V3c の比較用）
+    row_major float4x4 gShadowFarToUvz : packoffset(c22);   // カメラ相対の位置 [m] → 全体のカスケードの (u, v, 深度)
+    uint   gShadowFarSrv               : packoffset(c26.x); // 地形の影（全体のカスケード）。無効値なら影なし（design.md §5.5）
+    uint   gShadowNearSrv              : packoffset(c26.y); // 近景のカスケード。無効値なら全体だけ
+    uint   gApShadowMethod             : packoffset(c26.z); // AP_SHADOW_*
+    uint   gApPerPixelSteps            : packoffset(c26.w); // 方式 5: 視線上で影を調べる点の数
+    row_major float4x4 gShadowNearToUvz : packoffset(c27);  // カメラ相対の位置 [m] → 近景のカスケードの (u, v, 深度)
+    float  gApShadowFilterScale        : packoffset(c31.x); // 方式 1: 円盤の半径の倍率（1 = ボクセルの半幅）
+    uint   gApPerPixelBisectSteps      : packoffset(c31.y); // 方式 5: 影の境界の二分探索の回数
+    uint   gAerialPerspectiveMsUav     : packoffset(c31.z); // 空気遠近法のボリューム（多重散乱）
+    uint   gAerialPerspectiveMsSrv     : packoffset(c31.w);
 };
+
+// 定数の地形の影（2 段のカスケード）
+OpaqueShadowParameters LoadOpaqueShadow()
+{
+    OpaqueShadowParameters p;
+    p.farSrv = gShadowFarSrv;
+    p.nearSrv = gShadowNearSrv;
+    p.farToUvz = gShadowFarToUvz;
+    p.nearToUvz = gShadowNearToUvz;
+    return p;
+}
+
+// 空気遠近法・地形のピクセルのレイマーチ: 定数の地形の影を積分に使う（無効値なら影なし。1 回の比較）
+void SetOpaqueShadowFromConstants(inout IntegrationSettings s)
+{
+    s.opaqueShadow = LoadOpaqueShadow();
+    s.opaqueShadowFilterRadiusPerM = 0.0;
+}
 
 AtmosphereLuts LoadAtmosphereLuts()
 {
@@ -73,6 +115,61 @@ float3 OutputViewDirection(uint2 pixel)
 
 // [POINT] FP16 のシーンカラーに書く前のクランプ（太陽ディスクは露出後も 65504 を超えうる）
 static const float kMaxSceneColorFb = 65000.0;
+
+// Sky-View LUT 2 枚を、カメラ位置から見た方向 viewDir で引く。
+//   rayleighAndMs [sr⁻¹]  : Rayleigh の単散乱 + 多重散乱（単位照度あたり）
+//   mieNoPhase    [無次元]: Mie の単散乱から位相関数を除いたもの（× p_M(θ) で輝度）
+void SampleSkyViewLuts(float3 cameraPosKm, float3 viewDir, out float3 rayleighAndMs, out float3 mieNoPhase)
+{
+    const float r = length(cameraPosKm);
+    const float3 up = cameraPosKm / r;
+    const float viewZenithCos = dot(viewDir, up);
+
+    // [POINT] 視線と太陽の「方位差の余弦」を、カメラの水平面上で求める（参照実装と同じ）。
+    //         視線が真上・真下だと方位が定まらないが、その方向では値が方位に依存しないので 1 とする。
+    float lightViewCos = 1.0;
+    const float3 side = cross(up, viewDir);
+    if (dot(side, side) > 1e-12) {
+        const float3 sideN = normalize(side);
+        const float3 forward = normalize(cross(sideN, up));  // 視線の水平成分の向き
+        const float2 lightOnPlane = float2(dot(gSunDirection, forward), dot(gSunDirection, sideN));
+        const float len = length(lightOnPlane);
+        lightViewCos = len > 1e-6 ? lightOnPlane.x / len : 1.0;
+    }
+
+    float t0;
+    float t1;
+    const bool intersectGround = RaySphere(cameraPosKm, viewDir, gAtmosphere.bottomRadiusKm, t0, t1) && t0 > 0.0;
+    const float lutR = max(r, gAtmosphere.bottomRadiusKm + kSurfaceOffsetKm);
+    const float2 uv = SkyViewViewParamsToUv(gAtmosphere, intersectGround, viewZenithCos, lightViewCos, lutR,
+                                            gSkyViewLutSize);
+    Texture2D<float4> skyView = ResourceDescriptorHeap[gSkyViewLutSrv];
+    Texture2D<float4> skyViewMie = ResourceDescriptorHeap[gSkyViewMieLutSrv];
+    rayleighAndMs = skyView.SampleLevel(gLinearClamp, uv, 0.0).rgb;
+    mieNoPhase = skyViewMie.SampleLevel(gLinearClamp, uv, 0.0).rgb;
+}
+
+// 深度バッファの値（Reverse-Z、0 = 無限遠）から、カメラ → その点の距離 [km]。
+// [POINT] 回転のみの (View·Proj)⁻¹ で戻すと、カメラ相対の位置 [m] がそのまま得られる（平行移動を含めないため）。
+float DepthToDistanceKm(uint2 pixel, float depth)
+{
+    const float2 ndc = float2((float(pixel.x) + 0.5) / float(gWidth) * 2.0 - 1.0,
+                              1.0 - (float(pixel.y) + 0.5) / float(gHeight) * 2.0);
+    const float4 h = mul(gInvViewProjRot, float4(ndc, depth, 1.0));
+    return length(h.xyz / h.w) * 0.001;
+}
+
+// 地形のピクセルの空気遠近法: シーンカラー（fb）に透過率を掛け、内散乱を足す。
+//   inscatterPerLux [sr⁻¹]、transmittance [無次元]
+void ApplyAerialPerspective(uint2 pixel, float3 inscatterPerLux, float3 transmittance)
+{
+    RWTexture2D<float4> output = ResourceDescriptorHeap[gOutputUav];
+    const float3 geometryFb = output[pixel].rgb;
+    // [POINT] 内散乱は単位照度あたりなので、E_sun × 太陽の色を掛けて輝度にし、露出して fb にする。
+    //         地形の色はすでに露出済みの fb なので、透過率をそのまま掛ける。
+    const float3 fb = geometryFb * transmittance + inscatterPerLux * gSunIlluminanceLux * gExposureScale;
+    output[pixel] = float4(min(fb, kMaxSceneColorFb), 1.0);
+}
 
 // 単位照度あたりの輝度 [sr⁻¹] を出力する。カメラ視点なら L = (L/E)·E_sun を露出して fb で書く。
 void WriteSkyOutput(uint2 pixel, float3 luminancePerLux, float3 viewDir)

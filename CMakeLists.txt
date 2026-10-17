@@ -69,6 +69,10 @@ compile_shader(atmosphere/MultiScatteringLut.hlsl CSMain cs_6_6 MultiScatteringL
 compile_shader(atmosphere/SkyViewLut.hlsl CSMain cs_6_6 SkyViewLut_cs)
 compile_shader(atmosphere/SkyFromLut.hlsl CSMain cs_6_6 SkyFromLut_cs)
 compile_shader(atmosphere/PathTrace.hlsl CSMain cs_6_6 PathTrace_cs)
+compile_shader(atmosphere/AerialPerspective.hlsl CSMain cs_6_6 AerialPerspective_cs)
+compile_shader(atmosphere/SkyIrradiance.hlsl CSMain cs_6_6 SkyIrradiance_cs)
+compile_shader(scene/Mesh.hlsl VSMain vs_6_6 Mesh_vs)
+compile_shader(scene/Mesh.hlsl PSMain ps_6_6 Mesh_ps)
 
 add_custom_target(shaders DEPENDS ${SHADER_OUTPUTS} SOURCES ${SHADER_HEADERS})
 
@@ -83,7 +87,9 @@ add_executable(atmosphere
   src/atmosphere/AtmosphereRenderer.cpp
   src/atmosphere/PathTracer.cpp
   src/gfx/Device.cpp
+  src/gfx/Buffer.cpp
   src/gfx/Descriptors.cpp
+  src/gfx/GpuTimer.cpp
   src/gfx/Pipeline.cpp
   src/gfx/Texture.cpp
   src/display/ColorSpace.cpp
@@ -92,12 +98,17 @@ add_executable(atmosphere
   src/display/GT7ToneMapping.cpp
   src/display/Swapchain.cpp
   src/scene/Camera.cpp
+  src/scene/Meshes.cpp
   src/scene/TestPatternPass.cpp
+  src/render/SceneRenderer.cpp
+  src/render/ShadowRenderer.cpp
   src/ui/ImGuiLayer.cpp
   src/io/ExrWriter.cpp
   src/batch/Phase1Tests.cpp
   src/batch/Phase2Tests.cpp
   src/batch/Phase3Tests.cpp
+  src/batch/Phase4Tests.cpp
+  src/batch/Phase45Tests.cpp
 )
 add_dependencies(atmosphere shaders)
 

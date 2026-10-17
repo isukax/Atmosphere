@@ -5,10 +5,14 @@
 //   atmosphere.exe --test <name> --out <dir>      バッチ検証（Python の reference/validate_phase*.py から起動）
 //     Phase 1: gt7, pq   Phase 2: transmittance, single_scattering
 //     Phase 3: multiscattering, sky_lut, sun_closeup, pathtrace, spectral
+//     Phase 4: aerial_perspective, sky_irradiance, perf（perf は Release で実行する）
+//     Phase 4.5: shadow_surface, shadow_aerial_perspective, shadow_ap_methods
 #include "app/App.h"
 #include "batch/Phase1Tests.h"
 #include "batch/Phase2Tests.h"
 #include "batch/Phase3Tests.h"
+#include "batch/Phase4Tests.h"
+#include "batch/Phase45Tests.h"
 
 #include <iostream>
 #include <string>
@@ -41,6 +45,12 @@ int main(int argc, char** argv)
             }
             if (test == "transmittance" || test == "single_scattering") {
                 return batch::runPhase2Test(device, pipelines, test, outDir);
+            }
+            if (test == "aerial_perspective" || test == "sky_irradiance" || test == "perf") {
+                return batch::runPhase4Test(device, pipelines, test, outDir);
+            }
+            if (test == "shadow_surface" || test == "shadow_aerial_perspective" || test == "shadow_ap_methods") {
+                return batch::runPhase45Test(device, pipelines, test, outDir);
             }
             return batch::runPhase3Test(device, pipelines, test, outDir);
         }

@@ -74,7 +74,8 @@ public:
     void executeImmediate(const std::function<void(ID3D12GraphicsCommandList*)>& record);
 
     BindlessHeap& bindless() { return m_bindless; }
-    RtvPool& rtvPool() { return m_rtvPool; }
+    CpuDescriptorPool& rtvPool() { return m_rtvPool; }
+    CpuDescriptorPool& dsvPool() { return m_dsvPool; }
     UploadRing& upload() { return m_upload; }
     ID3D12GraphicsCommandList* cmd() const { return m_cmd.Get(); }
 
@@ -102,7 +103,8 @@ private:
     uint64_t m_frameNumber = 0;
 
     BindlessHeap m_bindless;
-    RtvPool m_rtvPool;
+    CpuDescriptorPool m_rtvPool;
+    CpuDescriptorPool m_dsvPool;
     UploadRing m_upload;
 };
 
