@@ -83,9 +83,13 @@ int runAerialPerspective(gfx::Device& device, const gfx::PipelineLibrary& pipeli
                                {"vertical_fov_deg", glm::degrees(camera.verticalFovRad)},
                                {"atmosphere", atmosphere::toJson(params)}};
 
-        enum class Path { Geometry, Volume, RaymarchRgb, RaymarchMean };
+        // volume = 透過率がボリュームの RGB 平均（Phase 4 と同じ）、volume_lut_t = Transmittance LUT の比、
+        // volume_rgb_t = ボリュームの RGB の透過率（design.md §5.7 の方式 1 / 2）
+        enum class Path { Geometry, Volume, VolumeLutT, VolumeRgbT, RaymarchRgb, RaymarchMean };
         const std::pair<Path, const char*> paths[] = {{Path::Geometry, "geometry"},
                                                       {Path::Volume, "volume"},
+                                                      {Path::VolumeLutT, "volume_lut_t"},
+                                                      {Path::VolumeRgbT, "volume_rgb_t"},
                                                       {Path::RaymarchRgb, "raymarch_rgb"},
                                                       {Path::RaymarchMean, "raymarch_mean"}};
         for (const auto& [path, pathName] : paths) {
@@ -95,8 +99,12 @@ int runAerialPerspective(gfx::Device& device, const gfx::PipelineLibrary& pipeli
                 atmo.updateAerialPerspective(cmd, device.upload(), params, view, quality.multipleScattering);
                 atmo.updateSkyIrradiance(cmd, device.upload(), params, view.cameraPosKm);
                 targets.drawScene(cmd, device.upload(), sceneRenderer, sceneView, params, atmo);
-                if (path == Path::Volume) {
-                    atmo.renderSkyFromLut(cmd, device.upload(), params, view, targets.color.uavIndex(), w, h);
+                if (path == Path::Volume || path == Path::VolumeLutT || path == Path::VolumeRgbT) {
+                    atmosphere::SkyView pathView = view;
+                    pathView.apTransmittance = path == Path::VolumeLutT   ? atmosphere::AerialPerspectiveTransmittanceMode::LutRatio
+                                               : path == Path::VolumeRgbT ? atmosphere::AerialPerspectiveTransmittanceMode::VolumeRgb
+                                                                          : atmosphere::AerialPerspectiveTransmittanceMode::VolumeMean;
+                    atmo.renderSkyFromLut(cmd, device.upload(), params, pathView, targets.color.uavIndex(), w, h);
                 } else if (path != Path::Geometry) {
                     atmosphere::RaymarchSettings settings;
                     settings.primarySteps = 2048;
@@ -111,6 +119,109 @@ int runAerialPerspective(gfx::Device& device, const gfx::PipelineLibrary& pipeli
         }
         targets.saveDepth(device, outDir / std::format("{}_depth.exr", c.name), camera.nearM);
         gfx::log(std::string("aerial_perspective: ") + c.name);
+    }
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
+// V3h: 空気遠近法の RGB 透過率（design.md §5.7）
+// ---------------------------------------------------------------------------
+
+int runApTransmittance(gfx::Device& device, const gfx::PipelineLibrary& pipelines, const std::filesystem::path& outDir)
+{
+    constexpr uint32_t w = 640;
+    constexpr uint32_t h = 360;
+    render::SceneRenderer sceneRenderer(device, pipelines);
+    SceneTargets targets(device, w, h, DXGI_FORMAT_R32G32B32A32_FLOAT);
+    const atmosphere::AtmosphereQuality quality;
+    const float aspect = static_cast<float>(w) / static_cast<float>(h);
+    // [POINT] 透過率は太陽の向きに依存しない（カメラと視線だけで決まる）。太陽は昼の前方で固定し、カメラを変える。
+    atmosphere::AtmosphereParams params = atmosphere::loadDefaultParams(kCoefficientPath);
+    params.sunZenithDeg = 45.0f;
+    params.sunAzimuthDeg = -90.0f;
+
+    struct CameraCase {
+        const char* name;
+        float heightM;
+        float pitchDeg;
+        bool fp16;  // RGBA16F の LUT でも測る
+    };
+    const CameraCase cameras[] = {
+        {"c1", 300.0f, -2.0f, true},     // V3c と同じ。分岐の境目（俯角 0.56°）が地形の上に入る
+        {"c2", 2.0f, 0.0f, true},        // 地平線すれすれの長い光線
+        {"c3", 3000.0f, -15.0f, false},  // 地表の球に当たる側の式（逆向き）が中心
+    };
+    struct LutFormat {
+        const char* name;
+        DXGI_FORMAT format;
+    };
+    const LutFormat formats[] = {{"fp32", DXGI_FORMAT_R32G32B32A32_FLOAT}, {"fp16", DXGI_FORMAT_R16G16B16A16_FLOAT}};
+    for (const LutFormat& format : formats) {
+        atmosphere::AtmosphereRenderer atmo(device, pipelines, format.format);
+        for (const CameraCase& c : cameras) {
+            if (format.format == DXGI_FORMAT_R16G16B16A16_FLOAT && !c.fp16) {
+                continue;
+            }
+            scene::Camera camera = testCamera();
+            camera.positionM.y = c.heightM;
+            camera.pitchRad = glm::radians(c.pitchDeg);
+            atmosphere::SkyView view;
+            view.invViewProjRot = glm::inverse(camera.projection(aspect) * camera.viewRotation());
+            view.cameraPosKm = atmosphere::worldToPlanetKm(params, camera.positionM);
+            view.exposureScale = 1.0f / params.sunIlluminanceLux;
+            view.sunDisk = false;
+            view.depthSrv = targets.depth.srvIndex();
+            view.writeApTransmittance = true;
+            render::SceneView sceneView;
+            sceneView.viewProjRot = camera.projection(aspect) * camera.viewRotation();
+            sceneView.cameraPosM = camera.positionM;
+            sceneView.exposureScale = view.exposureScale;
+
+            enum class Path { VolumeMean, LutRatio, VolumeRgb, RaymarchRgb, RaymarchMean };
+            const std::pair<Path, const char*> paths[] = {{Path::VolumeMean, "volume_mean"},
+                                                          {Path::LutRatio, "lut_ratio"},
+                                                          {Path::VolumeRgb, "volume_rgb"},
+                                                          {Path::RaymarchRgb, "raymarch_rgb"},
+                                                          {Path::RaymarchMean, "raymarch_mean"}};
+            for (const auto& [path, pathName] : paths) {
+                device.upload().beginSlot(0);
+                device.executeImmediate([&](ID3D12GraphicsCommandList* cmd) {
+                    atmo.updateLuts(cmd, device.upload(), params, quality, view.cameraPosKm);
+                    atmo.updateAerialPerspective(cmd, device.upload(), params, view, quality.multipleScattering);
+                    atmo.updateSkyIrradiance(cmd, device.upload(), params, view.cameraPosKm);
+                    targets.drawScene(cmd, device.upload(), sceneRenderer, sceneView, params, atmo);
+                    if (path == Path::VolumeMean || path == Path::LutRatio || path == Path::VolumeRgb) {
+                        atmosphere::SkyView pathView = view;
+                        pathView.apTransmittance =
+                            path == Path::LutRatio    ? atmosphere::AerialPerspectiveTransmittanceMode::LutRatio
+                            : path == Path::VolumeRgb ? atmosphere::AerialPerspectiveTransmittanceMode::VolumeRgb
+                                                      : atmosphere::AerialPerspectiveTransmittanceMode::VolumeMean;
+                        atmo.renderSkyFromLut(cmd, device.upload(), params, pathView, targets.color.uavIndex(), w, h);
+                    } else {
+                        // 基準: 深度までのレイマーチ（2048 区間）の透過率。視線方向の消散を直接積分するので LUT に依存しない
+                        atmosphere::RaymarchSettings settings;
+                        settings.primarySteps = 2048;
+                        settings.multipleScattering = true;
+                        settings.meanTransmittance = path == Path::RaymarchMean;
+                        atmo.renderSkyRaymarch(cmd, device.upload(), params, view, settings, targets.color.uavIndex(),
+                                               w, h);
+                    }
+                });
+                const nlohmann::json meta = {{"units", "transmittance camera -> terrain point (RGB, dimensionless)"},
+                                             {"camera", c.name},
+                                             {"camera_height_m", camera.positionM.y},
+                                             {"camera_yaw_deg", glm::degrees(camera.yawRad)},
+                                             {"camera_pitch_deg", glm::degrees(camera.pitchRad)},
+                                             {"vertical_fov_deg", glm::degrees(camera.verticalFovRad)},
+                                             {"bottom_radius_km", params.bottomRadiusKm},
+                                             {"lut_format", format.name},
+                                             {"path", pathName}};
+                io::saveExr(outDir / std::format("{}_{}_t_{}.exr", c.name, format.name, pathName), w, h,
+                            toFloats(targets.color.readback(device, 16)), meta);
+            }
+            targets.saveDepth(device, outDir / std::format("{}_{}_depth.exr", c.name, format.name), camera.nearM);
+            gfx::log(std::format("ap_transmittance: {} {}", c.name, format.name));
+        }
     }
     return 0;
 }
@@ -196,6 +307,7 @@ int runPerf(gfx::Device& device, const gfx::PipelineLibrary& pipelines, const st
         view.cameraPosKm = atmosphere::worldToPlanetKm(params, camera.positionM);
         view.exposureScale = 1.0f / (1.2f * std::exp2(15.0f));
         view.depthSrv = targets.depth.srvIndex();
+        view.apTransmittance = atmosphere::AerialPerspectiveTransmittanceMode::VolumeMean;  // 従来の合成の時間（比較用）
         render::SceneView sceneView;
         sceneView.viewProjRot = camera.projection(aspect) * camera.viewRotation();
         sceneView.cameraPosM = camera.positionM;
@@ -279,6 +391,18 @@ int runPerf(gfx::Device& device, const gfx::PipelineLibrary& pipelines, const st
                 t = timer.begin(cmd, "sky_and_aerial_perspective_composite");
                 atmo.renderSkyFromLut(cmd, device.upload(), params, view, targets.color.uavIndex(), w, h);
                 timer.end(cmd, t);
+                // 透過率を Transmittance LUT の比で求める合成（design.md §5.7。上は RGB 平均の方式で測る）
+                atmosphere::SkyView lutTView = view;
+                lutTView.apTransmittance = atmosphere::AerialPerspectiveTransmittanceMode::LutRatio;
+                t = timer.begin(cmd, "sky_and_aerial_perspective_composite_lut_t");
+                atmo.renderSkyFromLut(cmd, device.upload(), params, lutTView, targets.color.uavIndex(), w, h);
+                timer.end(cmd, t);
+                // 透過率をボリュームの RGB で引く合成（§5.7 の方式 2）
+                atmosphere::SkyView rgbTView = view;
+                rgbTView.apTransmittance = atmosphere::AerialPerspectiveTransmittanceMode::VolumeRgb;
+                t = timer.begin(cmd, "sky_and_aerial_perspective_composite_volume_rgb_t");
+                atmo.renderSkyFromLut(cmd, device.upload(), params, rgbTView, targets.color.uavIndex(), w, h);
+                timer.end(cmd, t);
                 // 方式 5 の合成（時間だけを測る。結果の画像は使わない）。視線上 32 点 + 境界の二分探索 6 回
                 atmosphere::SkyView perPixelView = shadowView;
                 perPixelView.depthSrv = view.depthSrv;
@@ -331,6 +455,9 @@ int runPhase4Test(gfx::Device& device, const gfx::PipelineLibrary& pipelines, st
     std::filesystem::create_directories(outDir);
     if (name == "aerial_perspective") {
         return runAerialPerspective(device, pipelines, outDir);
+    }
+    if (name == "ap_transmittance") {
+        return runApTransmittance(device, pipelines, outDir);
     }
     if (name == "sky_irradiance") {
         return runSkyIrradiance(device, pipelines, outDir);

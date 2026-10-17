@@ -1,6 +1,7 @@
 // LUT による合成（Hillaire 2020 の実用パス）:
 //   空のピクセル  … Sky-View LUT から空 + 太陽ディスク
-//   地形のピクセル … 空気遠近法のボリュームから、透過率と内散乱を地形の色に掛ける
+//   地形のピクセル … 空気遠近法のボリュームから内散乱を、ボリュームか Transmittance LUT の比（§5.7）から透過率を
+//                    求めて地形の色に掛ける
 // Mie の単散乱だけは位相関数を LUT の外でピクセルごとに掛ける（本実装の変更点。SkyViewLut.hlsl 参照）。
 // 地形の影は、ボリュームに入れる（方式 0 / 1）か、ここでピクセルごとに差し引く（方式 5）。design.md §5.6。
 #include "atmosphere/SkyPassConstants.hlsli"
@@ -14,15 +15,22 @@ struct AerialPerspectiveSample
     float transmittance;  // 透過率の RGB 平均
 };
 
-AerialPerspectiveSample SampleAerialPerspective(float2 uv, float distanceKm)
+// ボリュームのテクスチャ座標と、最初のスライスより手前のフェードの重み
+float3 AerialPerspectiveUvw(float2 uv, float distanceKm, out float fade)
 {
     // [POINT] スライス座標 s = 距離 / 4 km。ボリュームは s = ((z + 0.5)/32)² × 32 の 2 次配置で作ったので、
     //         テクスチャ座標は w = √(s / 32)（参照実装と同じ）。カメラのすぐ近く（s < 0.5）は最初の
     //         スライスより手前なので、内散乱と不透明度を 2s 倍してフェードする（段差の防止）。
     float slice = distanceKm / gApKmPerSlice;
-    const float fade = slice < 0.5 ? saturate(slice * 2.0) : 1.0;
+    fade = slice < 0.5 ? saturate(slice * 2.0) : 1.0;
     slice = max(slice, 0.5);
-    const float3 uvw = float3(uv, sqrt(slice / gApSliceCount));
+    return float3(uv, sqrt(slice / gApSliceCount));
+}
+
+AerialPerspectiveSample SampleAerialPerspective(float2 uv, float distanceKm)
+{
+    float fade;
+    const float3 uvw = AerialPerspectiveUvw(uv, distanceKm, fade);
     Texture3D<float4> ap = ResourceDescriptorHeap[gAerialPerspectiveSrv];
     Texture3D<float4> apMie = ResourceDescriptorHeap[gAerialPerspectiveMieSrv];
     Texture3D<float4> apMs = ResourceDescriptorHeap[gAerialPerspectiveMsSrv];
@@ -123,7 +131,24 @@ void CSMain(uint3 id : SV_DispatchThreadID)
                 ShadowedSingleScattering(uv, viewDir, distanceKm, end, rayleigh, mieNoPhase);
             }
             const float3 inscatter = rayleigh + end.multiple + phaseMie * mieNoPhase;
-            ApplyAerialPerspective(id.xy, inscatter, end.transmittance.xxx);
+            // [POINT] 透過率（design.md §5.7）: ボリュームの A は RGB の平均で、遠景で R が暗く B が明るくなる
+            //         （5〜20 km で ±6%、V3c）。Transmittance LUT の比なら RGB のまま求まる。スライス 0 の手前の
+            //         フェードはボリュームのためのものなので、比の透過率には掛けない（d → 0 で正しく 1 に近づく）。
+            float3 transmittance = end.transmittance.xxx;
+            if (gApTransmittanceMode == AP_TRANSMITTANCE_LUT_RATIO) {
+                const float r = length(gCameraPosKm);
+                const float mu = dot(gCameraPosKm, viewDir) / r;
+                Texture2D<float4> lut = ResourceDescriptorHeap[gTransmittanceLutSrv];
+                transmittance = TransmittanceToPoint(gAtmosphere, lut, gLinearClamp, r, mu, distanceKm,
+                                                     gTransmittanceLutSize);
+            } else if (gApTransmittanceMode == AP_TRANSMITTANCE_VOLUME_RGB) {
+                // 方式 2: ボリュームに積分した RGB の透過率。フェードは方式 0 と同じく不透明度 (1 − T) に掛ける
+                float fade;
+                const float3 uvw = AerialPerspectiveUvw(uv, distanceKm, fade);
+                Texture3D<float4> apT = ResourceDescriptorHeap[gAerialPerspectiveTransmittanceSrv];
+                transmittance = 1.0 - fade * (1.0 - apT.SampleLevel(gLinearClamp, uvw, 0.0).rgb);
+            }
+            ApplyAerialPerspective(id.xy, inscatter, transmittance);
             return;
         }
     }

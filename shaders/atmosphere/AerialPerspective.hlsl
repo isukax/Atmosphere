@@ -5,6 +5,7 @@
 //   gAerialPerspectiveMieUav : RGB = Mie の単散乱から位相関数を除いた内散乱 [無次元]、
 //                              A = 視線上の点で太陽が見える割合の平均（地形の影の検証用。合成では使わない）
 //   gAerialPerspectiveMsUav  : RGB = 多重散乱の内散乱 [sr⁻¹]（影の対象外）
+//   gAerialPerspectiveTransmittanceUav : RGB = 透過率（design.md §5.7 の方式 2。A は 1）
 // 地形の色には、合成パス（SkyFromLut）で color × T + 内散乱 として掛ける。
 // [POINT] Mie の位相関数は Sky-View LUT と同じ理由で分けて持つ（design.md §12 Q9）。画面方向の解像度は
 //         画角 60° で 1 ボクセル ~1.9° しかなく、g が大きい Mie の光輪（g = 0.99 で幅 0.88°）を表せない。
@@ -78,4 +79,6 @@ void CSMain(uint3 id : SV_DispatchThreadID)
     output[id] = float4(result.luminance - result.multipleScattering, dot(result.transmittance, 1.0 / 3.0));
     mieOutput[id] = float4(result.mieSingleNoPhase, result.opaqueShadowMean);
     msOutput[id] = float4(result.multipleScattering, 1.0);
+    RWTexture3D<float4> transmittanceOutput = ResourceDescriptorHeap[gAerialPerspectiveTransmittanceUav];
+    transmittanceOutput[id] = float4(result.transmittance, 1.0);
 }

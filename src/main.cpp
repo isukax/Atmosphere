@@ -6,6 +6,7 @@
 //     Phase 1: gt7, pq   Phase 2: transmittance, single_scattering
 //     Phase 3: multiscattering, sky_lut, sun_closeup, pathtrace, spectral
 //     Phase 4: aerial_perspective, sky_irradiance, perf（perf は Release で実行する）
+//     Phase 4.6: ap_transmittance
 //     Phase 4.5: shadow_surface, shadow_aerial_perspective, shadow_ap_methods
 #include "app/App.h"
 #include "batch/Phase1Tests.h"
@@ -46,7 +47,8 @@ int main(int argc, char** argv)
             if (test == "transmittance" || test == "single_scattering") {
                 return batch::runPhase2Test(device, pipelines, test, outDir);
             }
-            if (test == "aerial_perspective" || test == "sky_irradiance" || test == "perf") {
+            if (test == "aerial_perspective" || test == "ap_transmittance" || test == "sky_irradiance" ||
+                test == "perf") {
                 return batch::runPhase4Test(device, pipelines, test, outDir);
             }
             if (test == "shadow_surface" || test == "shadow_aerial_perspective" || test == "shadow_ap_methods") {

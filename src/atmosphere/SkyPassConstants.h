@@ -14,6 +14,7 @@ namespace atmosphere {
 /// SkyPassConstants.hlsli の SKY_FLAG_*
 inline constexpr uint32_t kSkyFlagMultipleScattering = 1u;
 inline constexpr uint32_t kSkyFlagSunDisk = 2u;
+inline constexpr uint32_t kSkyFlagWriteApTransmittance = 4u;  // 検証用: 地形のピクセルに透過率を書く（V3h）
 
 struct SkyPassConstants {
     AtmosphereGpu atmosphere;          // c0-c5
@@ -44,8 +45,10 @@ struct SkyPassConstants {
     uint32_t accumulationUavB;         // c18.x
     uint32_t skyViewMieLutUav;         // c18.y
     uint32_t skyViewMieLutSrv;         // c18.z
-    uint32_t pad18;
-    uint32_t pad19[3];                 // c19.xyz
+    uint32_t apTransmittanceMode;      // c18.w（AerialPerspectiveTransmittanceMode）
+    uint32_t aerialPerspectiveTransmittanceUav;  // c19.x
+    uint32_t aerialPerspectiveTransmittanceSrv;  // c19.y
+    uint32_t pad19;                    // c19.z
     uint32_t skyIrradianceUav;         // c19.w
     uint32_t aerialPerspectiveUav;     // c20.x
     uint32_t aerialPerspectiveMieUav;  // c20.y
@@ -83,6 +86,9 @@ static_assert(offsetof(SkyPassConstants, frameIndex) == 17 * 16);
 static_assert(offsetof(SkyPassConstants, accumulationUavB) == 18 * 16);
 static_assert(offsetof(SkyPassConstants, skyViewMieLutUav) == 18 * 16 + 4);
 static_assert(offsetof(SkyPassConstants, skyViewMieLutSrv) == 18 * 16 + 8);
+static_assert(offsetof(SkyPassConstants, apTransmittanceMode) == 18 * 16 + 12);
+static_assert(offsetof(SkyPassConstants, aerialPerspectiveTransmittanceUav) == 19 * 16);
+static_assert(offsetof(SkyPassConstants, aerialPerspectiveTransmittanceSrv) == 19 * 16 + 4);
 static_assert(offsetof(SkyPassConstants, skyIrradianceUav) == 19 * 16 + 12);
 static_assert(offsetof(SkyPassConstants, aerialPerspectiveUav) == 20 * 16);
 static_assert(offsetof(SkyPassConstants, aerialPerspectiveMieSrv) == 20 * 16 + 12);

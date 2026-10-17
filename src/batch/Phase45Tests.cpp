@@ -152,6 +152,9 @@ int runShadowAerialPerspective(gfx::Device& device, const gfx::PipelineLibrary& 
         view.exposureScale = 1.0f / params.sunIlluminanceLux;
         view.sunDisk = false;
         view.depthSrv = targets.depth.srvIndex();
+        // [POINT] Phase 4.5 の比較はレイマーチの RGB 平均の透過率と揃えるので、ボリュームの透過率（RGB 平均）を明示する
+        //         （既定の透過率の方式が変わっても結果が変わらないように。design.md §5.7）
+        view.apTransmittance = atmosphere::AerialPerspectiveTransmittanceMode::VolumeMean;
         render::SceneView sceneView;
         sceneView.viewProjRot = camera.projection(aspect) * camera.viewRotation();
         sceneView.cameraPosM = camera.positionM;
@@ -263,6 +266,9 @@ int runShadowApMethods(gfx::Device& device, const gfx::PipelineLibrary& pipeline
         view.exposureScale = 1.0f / params.sunIlluminanceLux;  // fb = 単位照度あたりの輝度 [sr⁻¹]
         view.sunDisk = false;
         view.depthSrv = targets.depth.srvIndex();
+        // [POINT] Phase 4.5 の比較はレイマーチの RGB 平均の透過率と揃えるので、ボリュームの透過率（RGB 平均）を明示する
+        //         （既定の透過率の方式が変わっても結果が変わらないように。design.md §5.7）
+        view.apTransmittance = atmosphere::AerialPerspectiveTransmittanceMode::VolumeMean;
         render::SceneView sceneView;
         sceneView.viewProjRot = camera.projection(aspect) * camera.viewRotation();
         sceneView.cameraPosM = camera.positionM;

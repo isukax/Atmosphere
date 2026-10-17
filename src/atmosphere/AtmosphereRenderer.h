@@ -25,6 +25,13 @@ enum class RaymarchOutput : uint32_t {
     TestPerLux = 1,  // 検証用: 正距円筒の方向グリッド、単位照度あたりの輝度 [sr⁻¹]
 };
 
+/// 空気遠近法の透過率の求め方（SkyPassConstants.hlsli の AP_TRANSMITTANCE_* と一致させる）。design.md §5.7。
+enum class AerialPerspectiveTransmittanceMode : uint32_t {
+    VolumeMean = 0,  // ボリュームの A（RGB の平均。論文・参照実装と同じ近似）
+    LutRatio = 1,    // Transmittance LUT の比（RGB）
+    VolumeRgb = 2,   // ボリュームに RGB の透過率を持つ（もう 1 枚の 3D テクスチャ）
+};
+
 /// LUT の品質設定（ステップ数）と、多重散乱を入れるか。
 struct AtmosphereQuality {
     // [POINT] Transmittance LUT の積分区間数。論文の PC 設定は 40 だが、Phase 2 の検証（V1/V2）で
@@ -63,6 +70,12 @@ struct SkyView {
     ShadowInput shadow;
     /// 空気遠近法の影の方式（design.md §5.6）。updateAerialPerspective と renderSkyFromLut で同じ値を渡すこと
     AerialPerspectiveShadowOptions apShadow;
+    /// 空気遠近法の透過率の求め方（design.md §5.7）。renderSkyFromLut だけが使う。
+    /// [POINT] 既定はボリュームの RGB（方式 2）。RGB 平均（方式 0）は遠景で R/B が ±6%（高い視点で B 13%）ずれ、
+    ///         Transmittance LUT の比（方式 1）は地平線付近で崩れた（V3h、design.md §14 Phase 4.6）。
+    AerialPerspectiveTransmittanceMode apTransmittance = AerialPerspectiveTransmittanceMode::VolumeRgb;
+    /// 検証用（V3h）: 地形のピクセルに、合成の代わりに透過率（RGB）を書く。renderSkyFromLut / renderSkyRaymarch
+    bool writeApTransmittance = false;
 };
 
 /// 大気の LUT 生成と空の描画。Shoga へ移植する単位。
@@ -131,6 +144,7 @@ public:
     gfx::Texture& aerialPerspective() { return m_aerialPerspective; }
     gfx::Texture& aerialPerspectiveMie() { return m_aerialPerspectiveMie; }
     gfx::Texture& aerialPerspectiveMultiple() { return m_aerialPerspectiveMs; }
+    gfx::Texture& aerialPerspectiveTransmittance() { return m_aerialPerspectiveT; }
     /// 空からの照度の SH 係数（9 × float4、単位照度あたり、余弦の畳み込み済み）
     gfx::Buffer& skyIrradiance() { return m_skyIrradiance; }
 
@@ -153,6 +167,7 @@ private:
     gfx::Texture m_aerialPerspective;     // 3D: Rayleigh の単散乱の内散乱 [sr⁻¹]、A = 平均透過率
     gfx::Texture m_aerialPerspectiveMie;  // 3D: Mie の単散乱（位相関数なし）[無次元]
     gfx::Texture m_aerialPerspectiveMs;   // 3D: 多重散乱の内散乱 [sr⁻¹]（影の対象外。design.md §5.6）
+    gfx::Texture m_aerialPerspectiveT;    // 3D: 透過率（RGB）[無次元]（design.md §5.7 の方式 2）
     gfx::Buffer m_skyIrradiance;          // SH 係数 9 × float4
 
     std::optional<AtmosphereGpu> m_transmittanceParams;

@@ -94,6 +94,8 @@ private:
     bool m_skyIrradiance = true;  // 地形に空からの拡散照度を加える
     render::ShadowSettings m_shadow;  // 太陽のシャドウマップ（design.md §5.5）
     atmosphere::AerialPerspectiveShadowOptions m_apShadow;  // 空気遠近法の影の方式（design.md §5.6）
+    // 空気遠近法の透過率の求め方（design.md §5.7）
+    atmosphere::AerialPerspectiveTransmittanceMode m_apTransmittance = atmosphere::SkyView{}.apTransmittance;
     uint32_t m_pathTraceMaxDepth = 32;
     uint32_t m_pathTraceSamplesPerFrame = 1;
     std::vector<uint8_t> m_pathTraceKey;  // 累積をリセットすべき入力（カメラ・大気・設定）のバイト列

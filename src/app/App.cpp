@@ -278,6 +278,7 @@ void App::renderFrame()
         view.exposureScale = exposureScale();
         view.sunDisk = m_sunDisk;
         view.apShadow = m_apShadow;
+        view.apTransmittance = m_apTransmittance;
         // [POINT] LUT の更新順: Transmittance（媒質が変わったとき）→ Multi-scattering（同）→ Sky-View（毎フレーム）
         //         → 空気遠近法・空からの照度（毎フレーム）。後の LUT は前の LUT を読む。
         uint32_t t = m_gpuTimer->begin(cmd, "LUTs (T, MS, Sky-View)");
@@ -587,6 +588,11 @@ void App::drawAtmosphereUi()
         ImGui::TextDisabled("(not in path trace mode)");
         ImGui::Checkbox("Sky irradiance (SH)", &m_skyIrradiance);
         ImGui::SliderFloat("Terrain albedo", &m_sceneRenderer->terrainAlbedo, 0.0f, 1.0f, "%.2f");
+        // 空気遠近法の透過率（design.md §5.7）
+        int apTransmittance = static_cast<int>(m_apTransmittance);
+        if (ImGui::Combo("AP transmittance", &apTransmittance, "0: Volume (RGB mean)\0" "1: Transmittance LUT ratio (RGB)\0" "2: Volume (RGB)\0")) {
+            m_apTransmittance = static_cast<atmosphere::AerialPerspectiveTransmittanceMode>(apTransmittance);
+        }
         if (ImGui::TreeNode("Sun shadow (shadow map)")) {
             ImGui::Checkbox("Surface (terrain, spheres)", &m_shadow.surface);
             ImGui::Checkbox("Aerial perspective (single scattering)", &m_shadow.aerialPerspective);

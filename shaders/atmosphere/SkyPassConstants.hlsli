@@ -10,6 +10,12 @@
 
 #define SKY_FLAG_MULTIPLE_SCATTERING 1u
 #define SKY_FLAG_SUN_DISK 2u
+#define SKY_FLAG_WRITE_AP_TRANSMITTANCE 4u  // 検証用: 地形のピクセルに合成の代わりに透過率（RGB）を書く（V3h）
+
+// 空気遠近法の透過率の求め方（design.md §5.7）
+#define AP_TRANSMITTANCE_VOLUME_MEAN 0  // 0: ボリュームの A（RGB の平均。論文・参照実装と同じ近似）
+#define AP_TRANSMITTANCE_LUT_RATIO 1    // 1: Transmittance LUT の比（RGB）
+#define AP_TRANSMITTANCE_VOLUME_RGB 2   // 2: ボリュームの RGB の透過率（もう 1 枚の 3D テクスチャ）
 
 // 空気遠近法の影の方式（design.md §5.6）
 #define AP_SHADOW_VOLUME_POINT 0     // 0: ボリュームの積分で 1 回の比較
@@ -46,6 +52,9 @@ cbuffer SkyPassConstants : register(b0)
     uint   gAccumulationUavB           : packoffset(c18.x); // パストレーサー: 累積（奇数フレーム）
     uint   gSkyViewMieLutUav           : packoffset(c18.y); // Sky-View LUT の生成: Mie の単散乱（位相関数なし）の出力
     uint   gSkyViewMieLutSrv           : packoffset(c18.z); // LUT からの描画: 同じ LUT を読む
+    uint   gApTransmittanceMode        : packoffset(c18.w); // AP_TRANSMITTANCE_*
+    uint   gAerialPerspectiveTransmittanceUav : packoffset(c19.x); // 空気遠近法のボリューム（透過率 RGB、§5.7 の方式 2）
+    uint   gAerialPerspectiveTransmittanceSrv : packoffset(c19.y);
     uint   gSkyIrradianceUav           : packoffset(c19.w); // 空からの照度の SH 係数（9 × float4）の出力
     uint   gAerialPerspectiveUav       : packoffset(c20.x); // 空気遠近法のボリューム（Rayleigh + 多重散乱、A = 平均透過率）
     uint   gAerialPerspectiveMieUav    : packoffset(c20.y); // 空気遠近法のボリューム（Mie の単散乱、位相関数なし）
@@ -164,6 +173,10 @@ float DepthToDistanceKm(uint2 pixel, float depth)
 void ApplyAerialPerspective(uint2 pixel, float3 inscatterPerLux, float3 transmittance)
 {
     RWTexture2D<float4> output = ResourceDescriptorHeap[gOutputUav];
+    if ((gFlags & SKY_FLAG_WRITE_AP_TRANSMITTANCE) != 0) {
+        output[pixel] = float4(transmittance, 1.0);  // 検証用（V3h）: 内散乱と混ぜずに透過率だけを比べる
+        return;
+    }
     const float3 geometryFb = output[pixel].rgb;
     // [POINT] 内散乱は単位照度あたりなので、E_sun × 太陽の色を掛けて輝度にし、露出して fb にする。
     //         地形の色はすでに露出済みの fb なので、透過率をそのまま掛ける。

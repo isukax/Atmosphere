@@ -205,6 +205,38 @@ void MultiScatteringUvToRMuSun(AtmosphereParameters a, float2 uv, float2 lutSize
 }
 
 // ---------------------------------------------------------------------------
+// 2 点間の透過率（空気遠近法の RGB 透過率、design.md §5.7。式は Bruneton 2017 の GetTransmittance と同じ）
+// ---------------------------------------------------------------------------
+
+// 半径 r、天頂角の余弦 mu のカメラから、視線方向に距離 distanceKm [km] の点までの透過率（RGB、無次元）。
+// [POINT] 光学的厚さは区間について足し算なので τ(カメラ → 上端) = τ(カメラ → 点) + τ(点 → 上端)、透過率では
+//         T(カメラ → 点) = T_top(カメラ) / T_top(点)。Transmittance LUT 2 回の比で、ボリュームなしに RGB で求まる。
+//         地表の球に当たる光線は、上端までの経路が LUT の定義域の外（地面で止まる）なので、向きを逆にした
+//         光線（点 → カメラ → 上端）で同じ関係を使う。分岐はカメラの光線で 1 回だけ判定する
+//         （点の側で別に判定すると、境目で式が食い違う）。
+float3 TransmittanceToPoint(AtmosphereParameters a, Texture2D<float4> lut, SamplerState s, float r, float mu,
+                            float distanceKm, float2 lutSize)
+{
+    const float minR = a.bottomRadiusKm + kSurfaceOffsetKm;
+    r = max(r, minR);
+    const float d = distanceKm;
+    // 点の半径と天頂角の余弦（余弦定理）。float の誤差で球の下に入らないようクランプする。
+    const float rd = clamp(sqrt(d * d + 2.0 * r * mu * d + r * r), minR, a.topRadiusKm);
+    const float mud = clamp((r * mu + d) / rd, -1.0, 1.0);
+    float3 numerator;
+    float3 denominator;
+    if (RayIntersectsGround(a, r, mu)) {
+        numerator = SampleTransmittanceLut(a, lut, s, rd, -mud, lutSize);
+        denominator = SampleTransmittanceLut(a, lut, s, r, -mu, lutSize);
+    } else {
+        numerator = SampleTransmittanceLut(a, lut, s, r, mu, lutSize);
+        denominator = SampleTransmittanceLut(a, lut, s, rd, mud, lutSize);
+    }
+    // [POINT] d が小さいと、2 回の LUT 引きの補間誤差で比が 1 をわずかに超えうる（光の増幅になる）ので 1 で抑える。
+    return min(numerator / max(denominator, 1e-30), 1.0);
+}
+
+// ---------------------------------------------------------------------------
 // Sky-View LUT のパラメタ化（Hillaire 2020 §5.3、参照実装の UvToSkyViewLutParams）
 //   u = 視線と太陽の方位差の余弦（太陽側 = 0、反対側 = 1）を平方根で非線形化
 //   v = 視線の天頂角。v = 0.5 がちょうど地平線（高度に応じた見かけの地平線）で、
