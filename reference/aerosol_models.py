@@ -30,7 +30,9 @@ BASE_MIE_SCATTERING = 3.996e-3  # Hillaire 2020（km⁻¹、海面）
 BASE_MIE_ABSORPTION = 0.444e-3
 BASE_MIE_SCALE_HEIGHT = 1.2
 BASE_G = 0.8
-# 案 D の鉛直分布（仮定）: fine は境界層 1.5 km、coarse はより低い 1.0 km。上端から 0.3 km で減る
+# 案 D の鉛直分布（仮定）: fine は境界層 1.5 km、coarse はより低い 1.0 km。上端から 0.3 km で減る。
+# 晴れた日の昼の代表値として文献の範囲に入る（research.md §13）。自由大気の背景の項は Phase 4.9 で足す
+# （design.md §5.9「自由大気の背景の項」）
 FINE_LAYER_TOP_KM = 1.5
 COARSE_LAYER_TOP_KM = 1.0
 LAYER_DECAY_KM = 0.3

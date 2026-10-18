@@ -503,7 +503,7 @@ LUT 生成 4 パスは依存関係が浅く、非同期コンピュートに載�
   | C | 量だけを AOD550 = 0.1 に（ほかは base と同じ） |
   | C+A | C + Mie の位相関数（550 nm の値を全チャンネルに） |
   | C+B | C + Mie の係数の波長依存（位相関数は Cornette-Shanks のまま） |
-  | C+D | C + 鉛直分布を境界層の形に（仮定: fine は高さ 1.5 km まで一様、coarse は 1.0 km まで。その上は 0.3 km で減る） |
+  | C+D | C + 鉛直分布を境界層の形に（仮定: fine は高さ 1.5 km まで一様、coarse は 1.0 km まで。その上は 0.3 km で減る。値の根拠と限界は §13） |
   | C+A+B+D | すべて |
 
 - **シナリオ**: 地表 200 m で太陽天頂角 45°（昼）/ 80°（低い太陽）/ 88°（夕方）、高度 3 km で 80°。それぞれ太陽の方を向いた画面（画角 50°、320×180）、反対を向いた画面、太陽の周り ±6°（120×120）。
@@ -552,7 +552,7 @@ LUT 生成 4 パスは依存関係が浅く、非同期コンピュートに載�
 
 ### 12.5 注意（この実験で言えないこと）
 
-- **見た目が変わることと、正しくなることは別。** 粒子と鉛直分布は仮定の代表値で、実測の空と比べていない（§11 の改善案 F）。
+- **見た目が変わることと、正しくなることは別。** 粒子と鉛直分布は仮定の代表値で、実測の空と比べていない（§11 の改善案 F）。鉛直分布の値は後で文献と比べた（§13）。値は文献の範囲に入るが、D は自由大気の背景を持たないので、高度 3 km での D の効果は大きめに出ている可能性が高い。
 - **多重散乱の近似の誤差は測っていない。** どの変種も Hillaire 2020 の等方近似を使っている。AOD 0.1 ではこの近似の誤差が大きくなる可能性が高い（今の薄い大気でも、V4 で R の多重散乱が夕方 −37%）。GPU に入れる前に、パストレーサー（V4）を新しい大気で測り直す必要がある。パストレーサーには、位相関数の表からのサンプリングが要る。
 - RGB の 3 波長（680 / 550 / 440 nm）の近似。分光で計算した場合の B の大きさは確かめていない。
 - 太陽ディスクは描いていない。ディスクとの関係を、§12.2 の粒子（550 nm、G）で確かめた（2026-10-18）:
@@ -601,6 +601,58 @@ LUT 生成 4 パスは依存関係が浅く、非同期コンピュートに載�
 
 **注意**: §12.5 と同じ。加えて、今の量では多重散乱の近似は Cornette-Shanks で V4 の基準を満たしている（design.md §14 Phase 3、ΔE 0.9〜2.6）。位相関数の表（A）の場合はパストレースと比べていないが、多重散乱の割合が小さいので、AOD 0.1 ほどは外れないと考えている（未検証）。
 
+## 13. 調査: エアロゾルの鉛直分布（案 D）の根拠（2026-10-18）
+
+目的: プリセット `C+D`・`C+A+B+D` の鉛直分布（fine は高さ 1.5 km まで一様、coarse は 1.0 km まで、その上は H = 0.3 km で減る。`reference/aerosol_models.py`）は、§12 の実験のために置いた仮定で、出典がなかった。§12 で D が最も効いた条件（高度 3 km、ΔE 24 / 20）はこの値に強く依存するので、Phase 4.9（2 成分の GPU 実装）の前に文献で確かめた。
+
+### 13.1 文献の値
+
+| 項目 | 値 | 出典 | 注 |
+|---|---|---|---|
+| 昼の混合層の高さ（陸） | 全球・年平均で約 1.4 km（夜は約 0.2 km、海は昼夜とも約 0.7 km） | Bourgeois et al. 2018 §2.2（ERA-Interim、バルク Richardson 数） | 再解析の値 |
+| 　〃（ヨーロッパ、ライダー） | 夏の平均 1.9〜2.8 km（Leipzig・Belsk・Minsk）、冬の平均はほとんどの地点で 0.7〜1.3 km。大西洋から入る清浄な海洋性の空気（Aberystwyth、夏）で約 1.5 km | Wandinger et al. 2004（EARLINET 7 地点、2000〜2002 年、355 nm）の要旨 | 晴れた日の測定 |
+| 　〃（ラジオゾンデ） | 昼の中央値はヨーロッパ・米国とも 1 km 未満、夜は 0.5 km 未満。ヨーロッパの夏は 90 パーセンタイルで 2 km。昼は夏が高く、夜は冬が高い | Seidel et al. 2012 §4.1・図 3（1981〜2005 年、バルク Richardson 数） | ヨーロッパの「昼」は 12 UTC（正午前後、午後の最大より前）、米国の「昼」は 00 UTC（夕方）。天気を選ばない。1 km 未満では高さの不確かさが 50% を超えうる |
+| 層の中の形 | 昼は対流で数 km まで混ざった境界層になる。夕方以降も、エアロゾルは下がっていく境界層の高さに従わず、残留層に残る | Bourgeois et al. 2018 §3.2 | — |
+| 上端の遷移層の厚さ | 混合層の深さの 0.2〜0.4 倍 | Deardorff, Willis & Stockton 1980（水槽実験）の要旨 | 混合層 1.5 km なら 0.3〜0.6 km |
+| 高度別の AOD（全球） | 0〜1 km に 58〜63%、1〜2 km に 21%、2〜3 km に 8〜11%、3〜4 km に 4〜6%、4〜5 km に 2%、それより上は 1 km あたり 1% 未満。昼と夜でほぼ同じ | Bourgeois et al. 2018 §3.2（CALIOP 2007〜2015 年） | 多くの日・地点の平均 |
+| 自由大気の AOD の割合（昼） | 全球 31%（陸 29%、海 32%）。中緯度で約 10%、北半球の中緯度で 25%、南半球の中緯度で 13%、ITCZ で約 50% | Bourgeois et al. 2018 §3.1 | CALIOP は清浄な自由大気の消散を過小評価するので、実際はもっと多い可能性がある（著者の注記） |
+| 種類ごとの自由大気の割合 | 砂塵の AOD の 40%、海洋性の 20% が自由大気。煙は自由大気の AOD の 10% 以上 | Bourgeois et al. 2018 §3.1 | — |
+| fine と coarse の高さ | fine-mode の割合は上空ほど大きく、coarse-mode は地表の近くに多い。AOD の 30〜70% が境界層より上（昼夜とも。煙と都市性の混合が主） | Ferrare et al. 2018（ARM CHARMS、米国オクラホマ SGP、2015 年 7〜9 月。ポスター） | 1 か所・1 期間 |
+| 　〃（自由大気・成層圏） | 粒子のほとんどが 1 µm 未満 | Brattich et al. 2019（BEXUS18 の気球、約 27 km まで）の要旨 | GT7 の講演が引いている文献 |
+| 上空の砂塵層 | サハラ砂塵層（SAL）は、アフリカの近くで夏 1〜5 km・冬 0〜3 km。大西洋を渡ると下がる（メキシコ湾で 0〜2 km） | Tsamalis et al. 2013 の要旨（CALIOP 2006〜2011 年） | coarse が fine より上に来る例 |
+
+確認できなかったもの: Sasano 1996（つくばのライダーによる季節ごとの消散の鉛直分布。GT7 の講演が引いている）は文献の存在だけ確かめ、数値は得られなかった。OPAC（Hess et al. 1998）の高度分布の表は原典を読めなかった（二次情報だけなので、ここには書かない）。Matthias et al. 2004（EARLINET の境界層内の AOD の割合）は本文を読めなかった。
+
+### 13.2 今の仮定との比較
+
+高度帯ごとの AOD の割合 [%]（今の分布は解析式から計算。AOD は fine 70%・coarse 30%）:
+
+| 分布 | 0〜1 km | 1〜2 km | 2〜3 km | 3〜4 km | 4〜5 km | 5 km〜 | 2 km より上 |
+|---|---|---|---|---|---|---|---|
+| fine（上端 1.5 km、H 0.3 km） | 55.6 | 41.3 | 3.0 | 0.1 | 0 | 0 | 3.1 |
+| coarse（上端 1.0 km、H 0.3 km） | 76.9 | 22.3 | 0.8 | 0 | 0 | 0 | 0.8 |
+| D（2 成分の和） | 62.0 | 35.6 | 2.4 | 0.1 | 0 | 0 | 2.5 |
+| 指数 H = 1.2 km（`base`・`C`） | 56.5 | 24.6 | 10.7 | 4.6 | 2.0 | 1.6 | 18.9 |
+| CALIOP の全球平均（Bourgeois et al. 2018） | 58〜63 | 21 | 8〜11 | 4〜6 | 2 | < 1 / km | 約 15〜20 |
+
+1. **上端の高さ（fine 1.5 km）は文献の範囲に入る。** 陸の昼の平均（再解析で 1.4 km）、ヨーロッパの晴れた日の冬（0.7〜1.3 km）と夏（1.9〜2.8 km）の間にある。「晴れた日の昼の、季節をならした代表値」として妥当。夏の午後なら 2〜3 km、正午前や冬は 1 km 前後になる。
+2. **上端から先の減り方（H 0.3 km）も妥当。** 指数で減る形では、上端から 0.69 km で 1 割になる。遷移層の厚さの目安（0.3〜0.6 km）と同じ程度。
+3. **coarse を fine より低くすることは、地表から出る coarse（土壌・海塩）には合う**（Ferrare et al. 2018、海洋性の 80% が境界層内）。**運ばれてきた砂塵には合わない**（砂塵の 40% が自由大気、SAL は 1〜5 km）。今の coarse-mode の屈折率（1.53 + 0.003i）は砂塵に近いので、プリセットは「地元の土壌粒子」の想定と読むことになる。
+4. **最も大きな違いは自由大気。** D は 2 km より上に AOD の 2.5% しか持たないが、CALIOP の全球平均では 15〜20%、中緯度の自由大気の割合は 10〜25% ある（過小評価の可能性もある）。D は「境界層の上はほぼ真空」になっている。
+5. **指数 H = 1.2 km（Hillaire 2020 の既定）は、CALIOP の全球平均の分布とよく合う**（各帯の差は 4 ポイント以内。範囲で示された帯は範囲の端との差）。全球平均は、境界層の高さや上空の層が違う多くの日の平均なので、なめらかな指数に近くなると考えている。個々の晴れた日は「一様な層 + 上端で急に減る + 自由大気の薄い背景」の形に近い。
+
+§12 で、高度 3 km（境界層より上）から見ると「太陽の周りの光輪がほぼ消える」「霞は地平線の下の帯になる」（ΔE 24 / 20）となった。これは自由大気の背景が無いことで、大きめに出ている可能性が高い（未計算）。
+
+### 13.3 判断
+
+- **上端の高さと減り方の値（1.5 / 1.0 / 0.3 km）は変えない。** 晴れた日の昼の代表値として文献の範囲に入る。出典は §13.1。`aerosol_models.py` と JSON はそのまま。
+- **分布の形には、自由大気の背景が足りない。** 足すなら、解析式に項を 1 つ加える（例: ρ(h) = (1 − f)·exp(−max(h − h_top, 0)/H) + f·exp(−h/H_FT)。AOD のうち自由大気の割合 f を 10〜25%、H_FT を数 km にする）。GPU の `SampleMedium`、`AtmosphereGpu` の行、パストレーサーの表の媒質、Python の `Profile` が変わるので、Phase 4.9 の設計を変えることになる。→ **入れることにした**（2026-10-18、design.md §12 Q25）。初期値は fine の成分だけに全体の AOD の 15%、H_FT = 3 km。決め方と高度帯ごとの割合は design.md §5.9「自由大気の背景の項」。
+- 1 つの形では表せない状況（プリセットを増やすときの候補。今回は増やさない）:
+  - 夜: 0.2 km 程度の安定層と、その上に前日の残留層。
+  - 夏の午後: 上端 2〜3 km。
+  - 運ばれてきた砂塵: 1〜5 km の上空の層（coarse が fine より上）。
+  - 海の上: 境界層 0.7 km 程度、海塩の coarse が境界層の中。
+
 ## 参考文献・リソース
 
 - S. Hillaire, "A Scalable and Production Ready Sky and Atmosphere Rendering Technique", EGSR 2020 / CGF 39(4). https://sebh.github.io/publications/egsr2020.pdf
@@ -641,3 +693,11 @@ LUT 生成 4 パスは依存関係が浅く、非同期コンピュートに載�
 - A. Smirnov et al., "Optical Properties of Atmospheric Aerosol in Maritime Environments", JAS 59 (2002). https://mdsoar.org/items/1c142726-9ccb-4f52-aa98-54553d0e85ea
 - B. N. Holben et al., "An emerging ground-based aerosol climatology: Aerosol optical depth from AERONET", JGR 106 (2001). https://mdsoar.org/items/012c0eed-53cf-4dd3-90a8-98f2d501bb64
 - C. Bohren, D. Huffman, "Absorption and Scattering of Light by Small Particles" (BHMIE), Wiley 1983
+- Q. Bourgeois et al., "How much of the global aerosol optical depth is found in the boundary layer and free troposphere?", ACP 18, 7709–7720 (2018). https://acp.copernicus.org/articles/18/7709/2018/
+- U. Wandinger et al., "Air mass modification over Europe: EARLINET aerosol observations from Wales to Belarus", JGR 109, D24 (2004). https://uhra.herts.ac.uk/handle/2299/16209
+- D. J. Seidel et al., "Climatology of the planetary boundary layer over the continental United States and Europe", JGR 117, D17106 (2012). https://gml.noaa.gov/aftp/user/andy/Transcom_BLH/seidel12a.pdf
+- J. W. Deardorff, G. E. Willis, B. H. Stockton, "Laboratory studies of the entrainment zone of a convectively mixed layer", JFM 100, 41–64 (1980). https://www.cambridge.org/core/journals/journal-of-fluid-mechanics/article/laboratory-studies-of-the-entrainment-zone-of-a-convectively-mixed-layer/281C35D86F7E0CE863878305916A361F
+- R. Ferrare et al., "Aerosol Properties above SGP Derived from CHARMS Data", ARM/ASR PI Meeting 2018（ポスター）. https://asr.science.energy.gov/meetings/stm/posters/poster_pdf/2018/P001931.pdf
+- E. Brattich et al., "Measurements of aerosols and charged particles on the BEXUS18 stratospheric balloon", Ann. Geophys. 37, 389 (2019). https://angeo.copernicus.org/articles/37/389/2019/
+- C. Tsamalis et al., "The seasonal vertical distribution of the Saharan Air Layer and its modulation by the wind", ACP 13, 11235–11257 (2013). https://acp.copernicus.org/articles/13/11235/2013/
+- Y. Sasano, "Tropospheric aerosol extinction coefficient profiles derived from scanning lidar measurements over Tsukuba, Japan, from 1990 to 1993", Appl. Opt. 35(24), 4941–4952 (1996)（本文は未確認）
