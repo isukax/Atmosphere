@@ -29,13 +29,21 @@ class Atmosphere:
     ozone_absorption_per_km: np.ndarray     # (3,)
     ozone_center_km: float
     ozone_half_width_km: float
+    # エアロゾルのプリセット（design.md §5.9）: Mie の鉛直分布 exp(−max(h − h_top, 0)/H) と、位相関数の表
+    mie_boundary_layer_top_km: float = 0.0
+    mie_phase_table: np.ndarray | None = None  # (U, C) θ = π·u²（u 等間隔）。None なら Cornette-Shanks
 
     @classmethod
     def from_meta(cls, meta: dict) -> "Atmosphere":
-        """アプリが書いたサイドカーの "atmosphere"（AtmosphereParams の JSON）から作る。"""
+        """アプリが書いたサイドカーの "atmosphere"（AtmosphereParams の JSON）から作る。
+        位相関数の表はサイドカーに入れていないので、係数セットとプリセットの名前で data/atmosphere_coefficients.json
+        から読む（アプリと同じ値）。"""
 
         a = meta["atmosphere"]
         mie_scattering = np.asarray(a["mie_scattering_per_km"], dtype=np.float64)
+        table = None
+        if a.get("mie_phase_model") == "table":
+            table = load_phase_table(a["coefficient_set"], a["aerosol_preset"])
         return cls(
             bottom_radius_km=float(a["bottom_radius_km"]),
             top_radius_km=float(a["top_radius_km"]),
@@ -48,6 +56,8 @@ class Atmosphere:
             ozone_absorption_per_km=np.asarray(a["ozone_absorption_per_km"], dtype=np.float64),
             ozone_center_km=float(a["ozone_center_km"]),
             ozone_half_width_km=float(a["ozone_half_width_km"]),
+            mie_boundary_layer_top_km=float(a.get("mie_boundary_layer_top_km", 0.0)),
+            mie_phase_table=table,
         )
 
     @classmethod
@@ -77,9 +87,24 @@ class Atmosphere:
     def densities(self, altitude_km: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         h = np.asarray(altitude_km, dtype=np.float64)
         rayleigh = np.exp(-h / self.rayleigh_scale_height_km)
-        mie = np.exp(-h / self.mie_scale_height_km)
+        if self.mie_boundary_layer_top_km > 0.0:
+            mie = np.exp(-np.maximum(h - self.mie_boundary_layer_top_km, 0.0) / self.mie_scale_height_km)
+        else:
+            mie = np.exp(-h / self.mie_scale_height_km)
         ozone = np.maximum(0.0, 1.0 - np.abs(h - self.ozone_center_km) / self.ozone_half_width_km)
         return rayleigh, mie, ozone
+
+    def mie_phase(self, cos_theta: np.ndarray) -> np.ndarray:
+        """Mie の位相関数 [sr⁻¹]、形状 (N, C)（Cornette-Shanks なら (N, 1)）。
+        表は θ = π·u² で刻んだ点を u = √(θ/π) で線形補間する（GPU の MiePhase と同じ）。"""
+
+        cos_theta = np.asarray(cos_theta, dtype=np.float64)
+        if self.mie_phase_table is None:
+            return cornette_shanks_phase(self.mie_phase_g, cos_theta)[:, None]
+        table = np.asarray(self.mie_phase_table, dtype=np.float64)
+        u = np.sqrt(np.arccos(np.clip(cos_theta, -1.0, 1.0)) / np.pi)
+        grid = np.linspace(0.0, 1.0, table.shape[0])
+        return np.stack([np.interp(u, grid, table[:, c]) for c in range(table.shape[1])], axis=-1)
 
     def extinction(self, altitude_km: np.ndarray) -> np.ndarray:
         """σt(h) [km⁻¹]、形状 (..., 3)。"""
@@ -97,11 +122,14 @@ class Atmosphere:
         return (mu < 0.0) & (r * r * (mu * mu - 1.0) + self.bottom_radius_km ** 2 >= 0.0)
 
     def kink_breakpoints(self, r: np.ndarray, mu: np.ndarray) -> np.ndarray:
-        """光線（半径 r、天頂角の余弦 mu）がオゾン分布の折れ目の高度を横切る距離 t、形状 (M, 6)。
-        横切らない分は NaN。半径 ρ の球面との交点は t = −r·mu ± √(r²mu² − r² + ρ²)。"""
+        """光線（半径 r、天頂角の余弦 mu）がオゾン分布の折れ目の高度（と Mie の境界層の上端）を横切る距離 t、
+        形状 (M, 6 or 8)。横切らない分は NaN。半径 ρ の球面との交点は t = −r·mu ± √(r²mu² − r² + ρ²)。"""
 
-        radii = self.bottom_radius_km + self.ozone_center_km + np.array(
-            [-self.ozone_half_width_km, 0.0, self.ozone_half_width_km])
+        heights = [self.ozone_center_km - self.ozone_half_width_km, self.ozone_center_km,
+                   self.ozone_center_km + self.ozone_half_width_km]
+        if self.mie_boundary_layer_top_km > 0.0:
+            heights.append(self.mie_boundary_layer_top_km)  # 境界層の上端で Mie の密度の微分が不連続
+        radii = self.bottom_radius_km + np.array(heights)
         disc = (r * mu)[:, None] ** 2 - r[:, None] ** 2 + radii[None, :] ** 2
         s = np.sqrt(np.where(disc >= 0.0, disc, np.nan))
         return np.concatenate([-(r * mu)[:, None] - s, -(r * mu)[:, None] + s], axis=1)
@@ -253,14 +281,15 @@ class Atmosphere:
         rayleigh_d, mie_d, _ = self.densities(r - self.bottom_radius_km)
         cos_theta = dirs @ sun
         if isotropic:
-            phase_r = phase_m = np.full((n, 1), 1.0 / (4.0 * np.pi))
+            phase_r = np.full((n, 1), 1.0 / (4.0 * np.pi))
+            phase_m = np.full((n, 1, 1), 1.0 / (4.0 * np.pi))
         else:
             phase_r = rayleigh_phase(cos_theta)[:, None]
-            phase_m = cornette_shanks_phase(self.mie_phase_g, cos_theta)[:, None]
+            phase_m = self.mie_phase(cos_theta)[:, None, :]  # (n, 1, C or 1)
         sigma_r = rayleigh_d[..., None] * self.rayleigh_scattering_per_km
         sigma_m = mie_d[..., None] * self.mie_scattering_per_km
         sun_t = self.sun_transmittance(p.reshape(-1, 3), sun, inner_panels, order).reshape(r.shape + (n_ch,))
-        lum = np.einsum("nm,nmc->nc", w, view_t * (sigma_r * phase_r[..., None] + sigma_m * phase_m[..., None]) * sun_t)
+        lum = np.einsum("nm,nmc->nc", w, view_t * (sigma_r * phase_r[..., None] + sigma_m * phase_m) * sun_t)
         ms1 = np.einsum("nm,nmc->nc", w, view_t * (sigma_r + sigma_m))
 
         if ground_albedo is not None and np.any(hit_ground):
@@ -335,6 +364,19 @@ def cornette_shanks_phase(g: float, cos_theta: np.ndarray) -> np.ndarray:
     g2 = g * g
     denom = 1.0 + g2 - 2.0 * g * cos_theta
     return 3.0 / (8.0 * np.pi) * (1.0 - g2) * (1.0 + cos_theta ** 2) / ((2.0 + g2) * denom * np.sqrt(denom))
+
+
+def load_phase_table(coefficient_set: str, preset: str) -> np.ndarray:
+    """data/atmosphere_coefficients.json のプリセットの位相関数の表（1 成分目）、形状 (U, 3)"""
+
+    import json
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parents[1] / "data" / "atmosphere_coefficients.json"
+    coeff = json.loads(path.read_text(encoding="utf-8"))
+    s = next(x for x in coeff["sets"] if x["name"] == coefficient_set)
+    p = next(x for x in s["aerosol_presets"] if x["name"] == preset)
+    return np.asarray(p["components"][0]["phase"]["values_rgb"], dtype=np.float64)
 
 
 def sun_direction(zenith_deg: float, azimuth_deg: float) -> np.ndarray:

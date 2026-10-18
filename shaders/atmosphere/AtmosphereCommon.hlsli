@@ -27,7 +27,18 @@ struct AtmosphereParameters
     float3 ozoneAbsorptionPerKm;     // 最大密度（25 km）での値
     float  sunAngularRadiusRad;      // 0.004675
     float3 groundAlbedo;             // 地表の拡散反射率
-    float  pad0;
+    float  mieBoundaryLayerTopKm;    // Mie の鉛直分布の境界層の上端 h_top（0 なら指数分布、design.md §5.9）
+    // [POINT] Mie の位相関数の表（StructuredBuffer<float4>、θ = π·u² で 2,049 点、RGB）。無効値なら
+    //         Cornette-Shanks（miePhaseG）。表のときの miePhaseG は平均の余弦で、パストレーサーの方向の
+    //         サンプリング（Henyey-Greenstein）だけに使う。
+    uint   miePhaseTableSrv;
+    uint   mieComponentCount;        // Mie の成分の数（Phase 4.8 では 1。2 つ目の成分は Phase 4.9）
+    float  mie1BoundaryLayerTopKm;   // 以下、2 つ目の成分（Phase 4.9 で使う。今は未使用）
+    float  mie1ScaleHeightKm;
+    float3 mie1ScatteringPerKm;
+    float  mie1PhaseG;
+    float3 mie1ExtinctionPerKm;
+    uint   mie1PhaseTableSrv;
 };
 
 // ---------------------------------------------------------------------------
@@ -48,10 +59,11 @@ MediumSample SampleMedium(AtmosphereParameters a, float altitudeKm)
     //         地表すれすれの点がわずかに負の高度になる。負の高度で密度が 1 を超えると、パストレーサーの
     //         デルタトラッキングの前提（σt ≤ σ̄）が崩れ、惑星内部の点では exp が溢れて NaN になる。
     altitudeKm = max(altitudeKm, 0.0);
-    // [POINT] 密度分布: Rayleigh と Mie は指数（スケールハイト H で 1/e）、
-    //         オゾンは 25 km を中心とした幅 30 km のテント関数（吸収のみ、散乱しない）。
+    // [POINT] 密度分布: Rayleigh は指数（スケールハイト H で 1/e）、オゾンは 25 km を中心とした幅 30 km の
+    //         テント関数（吸収のみ、散乱しない）。Mie は境界層の解析式 exp(−max(h − h_top, 0)/H)
+    //         （design.md §5.9）。h_top = 0 なら指数分布と同じ式。
     const float rayleighDensity = exp(-altitudeKm / a.rayleighScaleHeightKm);
-    const float mieDensity = exp(-altitudeKm / a.mieScaleHeightKm);
+    const float mieDensity = exp(-max(altitudeKm - a.mieBoundaryLayerTopKm, 0.0) / a.mieScaleHeightKm);
     const float ozoneDensity = max(0.0, 1.0 - abs(altitudeKm - a.ozoneCenterKm) / a.ozoneHalfWidthKm);
 
     MediumSample m;

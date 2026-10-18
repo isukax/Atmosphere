@@ -16,6 +16,9 @@ static_assert(offsetof(AtmosphereGpu, mieScatteringPerKm) == 2 * 16);
 static_assert(offsetof(AtmosphereGpu, mieExtinctionPerKm) == 3 * 16);
 static_assert(offsetof(AtmosphereGpu, ozoneAbsorptionPerKm) == 4 * 16);
 static_assert(offsetof(AtmosphereGpu, groundAlbedo) == 5 * 16);
+static_assert(offsetof(AtmosphereGpu, miePhaseTableSrv) == 6 * 16);
+static_assert(offsetof(AtmosphereGpu, mie1ScatteringPerKm) == 7 * 16);
+static_assert(offsetof(AtmosphereGpu, mie1ExtinctionPerKm) == 8 * 16);
 
 glm::vec3 vec3From(const nlohmann::json& j)
 {
@@ -34,7 +37,45 @@ void store(float (&dst)[3], const glm::vec3& v)
     dst[2] = v.z;
 }
 
+MieComponentPreset parseMieComponent(const nlohmann::json& j)
+{
+    MieComponentPreset c;
+    c.name = j.at("name").get<std::string>();
+    c.scatteringPerKm = vec3From(j.at("scattering_per_km"));
+    c.absorptionPerKm = vec3From(j.at("absorption_per_km"));
+    c.boundaryLayerTopKm = j.at("boundary_layer_top_km").get<float>();
+    c.scaleHeightKm = j.at("scale_height_km").get<float>();
+    const nlohmann::json& phase = j.at("phase");
+    const std::string model = phase.at("model").get<std::string>();
+    if (model == "cornette_shanks") {
+        c.phaseG = phase.at("g").get<float>();
+    } else if (model == "table") {
+        c.phaseG = phase.at("asymmetry_g").at(1).get<float>();
+        const nlohmann::json& values = phase.at("values_rgb");
+        if (values.size() != kMiePhaseTableCount) {
+            throw std::runtime_error("Mie phase table must have " + std::to_string(kMiePhaseTableCount) + " points");
+        }
+        c.phaseTable.reserve(values.size());
+        for (const nlohmann::json& v : values) {
+            c.phaseTable.emplace_back(v.at(0).get<float>(), v.at(1).get<float>(), v.at(2).get<float>(), 0.0f);
+        }
+    } else {
+        throw std::runtime_error("Unknown Mie phase model: " + model);
+    }
+    return c;
+}
+
 } // namespace
+
+const AerosolPreset* CoefficientSet::findAerosolPreset(const std::string& presetName) const
+{
+    for (const AerosolPreset& p : aerosolPresets) {
+        if (p.name == presetName) {
+            return &p;
+        }
+    }
+    return nullptr;
+}
 
 std::vector<CoefficientSet> loadCoefficientSets(const std::filesystem::path& path)
 {
@@ -54,6 +95,17 @@ std::vector<CoefficientSet> loadCoefficientSets(const std::filesystem::path& pat
         set.mieAbsorptionPerKm = s.at("mie_absorption_per_km").get<float>();
         set.ozoneAbsorptionPerKm = vec3From(s.at("ozone_absorption_per_km"));
         set.sunColor = vec3From(s.at("sun_color"));
+        if (s.contains("aerosol_presets")) {
+            for (const nlohmann::json& p : s.at("aerosol_presets")) {
+                AerosolPreset preset;
+                preset.name = p.at("name").get<std::string>();
+                preset.aodRgb = vec3From(p.at("aod_rgb"));
+                for (const nlohmann::json& c : p.at("components")) {
+                    preset.components.push_back(parseMieComponent(c));
+                }
+                set.aerosolPresets.push_back(std::move(preset));
+            }
+        }
         sets.push_back(std::move(set));
     }
     return sets;
@@ -89,6 +141,28 @@ void AtmosphereParams::applyCoefficientSet(const CoefficientSet& set)
     sunColor = set.sunColor;
     coefficientSet = set.name;
     workingSpace = set.workingSpace;
+    if (const AerosolPreset* preset = set.findAerosolPreset(aerosolPreset)) {
+        applyAerosolPreset(*preset);
+    }
+}
+
+void AtmosphereParams::applyAerosolPreset(const AerosolPreset& preset)
+{
+    if (preset.components.size() != 1) {
+        throw std::runtime_error("Aerosol preset " + preset.name + ": only 1 Mie component is supported (Phase 4.8)");
+    }
+    const MieComponentPreset& c = preset.components.front();
+    if (!c.phaseTable.empty() && c.phaseTableSrv == kNoMiePhaseTable) {
+        // [POINT] 表を GPU に上げずに使うと、シェーダーは黙って Cornette-Shanks に戻る。誤りに気付けるよう止める
+        throw std::runtime_error("Aerosol preset " + preset.name + ": phase table is not uploaded (MiePhaseTables)");
+    }
+    mieScatteringPerKm = c.scatteringPerKm;
+    mieAbsorptionPerKm = c.absorptionPerKm;
+    mieBoundaryLayerTopKm = c.boundaryLayerTopKm;
+    mieScaleHeightKm = c.scaleHeightKm;
+    miePhaseG = c.phaseG;
+    miePhaseTableSrv = c.phaseTable.empty() ? kNoMiePhaseTable : c.phaseTableSrv;
+    aerosolPreset = preset.name;
 }
 
 glm::vec3 AtmosphereParams::sunDirection() const
@@ -116,6 +190,10 @@ AtmosphereGpu toGpu(const AtmosphereParams& p)
     store(g.ozoneAbsorptionPerKm, p.ozoneAbsorptionPerKm);
     g.sunAngularRadiusRad = p.sunAngularRadiusRad;
     store(g.groundAlbedo, p.groundAlbedo);
+    g.mieBoundaryLayerTopKm = p.mieBoundaryLayerTopKm;
+    g.miePhaseTableSrv = p.miePhaseTableSrv;
+    g.mieComponentCount = 1;
+    g.mie1PhaseTableSrv = kNoMiePhaseTable;
     return g;
 }
 
@@ -139,7 +217,10 @@ nlohmann::json toJson(const AtmosphereParams& p)
         {"mie_scattering_per_km", toJson(p.mieScatteringPerKm)},
         {"mie_absorption_per_km", toJson(p.mieAbsorptionPerKm)},
         {"mie_scale_height_km", p.mieScaleHeightKm},
+        {"mie_boundary_layer_top_km", p.mieBoundaryLayerTopKm},
         {"mie_phase_g", p.miePhaseG},
+        {"mie_phase_model", p.miePhaseTableSrv == kNoMiePhaseTable ? "cornette_shanks" : "table"},
+        {"aerosol_preset", p.aerosolPreset},
         {"ozone_absorption_per_km", toJson(p.ozoneAbsorptionPerKm)},
         {"ozone_center_km", p.ozoneCenterKm},
         {"ozone_half_width_km", p.ozoneHalfWidthKm},

@@ -23,15 +23,15 @@ struct MeshConstants {
     float transmittanceLutSize[2];       // c10.xy
     uint32_t useSkyIrradiance;           // c10.z
     float pad10;                         // c10.w
-    atmosphere::AtmosphereGpu atmosphere;  // c11-c16
-    float shadowNearToUvz[4][4];         // c17-c20（行優先）
-    float shadowFarToUvz[4][4];          // c21-c24
-    uint32_t shadowNearSrv;              // c25.x
-    uint32_t shadowFarSrv;               // c25.y
-    float shadowBlendBand;               // c25.z
-    uint32_t outputMode;                 // c25.w
-    float shadowNearNormalOffsetM;       // c26.x
-    float shadowFarNormalOffsetM;        // c26.y
+    atmosphere::AtmosphereGpu atmosphere;  // c11-c19
+    float shadowNearToUvz[4][4];         // c20-c23（行優先）
+    float shadowFarToUvz[4][4];          // c24-c27
+    uint32_t shadowNearSrv;              // c28.x
+    uint32_t shadowFarSrv;               // c28.y
+    float shadowBlendBand;               // c28.z
+    uint32_t outputMode;                 // c28.w
+    float shadowNearNormalOffsetM;       // c29.x
+    float shadowFarNormalOffsetM;        // c29.y
     float pad26[2];
 };
 static_assert(offsetof(MeshConstants, cameraPosM) == 4 * 16);
@@ -43,12 +43,12 @@ static_assert(offsetof(MeshConstants, sunIlluminanceLux) == 8 * 16);
 static_assert(offsetof(MeshConstants, planetOffsetKm) == 9 * 16);
 static_assert(offsetof(MeshConstants, transmittanceLutSize) == 10 * 16);
 static_assert(offsetof(MeshConstants, atmosphere) == 11 * 16);
-static_assert(offsetof(MeshConstants, shadowNearToUvz) == 17 * 16);
-static_assert(offsetof(MeshConstants, shadowFarToUvz) == 21 * 16);
-static_assert(offsetof(MeshConstants, shadowNearSrv) == 25 * 16);
-static_assert(offsetof(MeshConstants, outputMode) == 25 * 16 + 12);
-static_assert(offsetof(MeshConstants, shadowNearNormalOffsetM) == 26 * 16);
-static_assert(sizeof(MeshConstants) == 27 * 16);
+static_assert(offsetof(MeshConstants, shadowNearToUvz) == 20 * 16);
+static_assert(offsetof(MeshConstants, shadowFarToUvz) == 24 * 16);
+static_assert(offsetof(MeshConstants, shadowNearSrv) == 28 * 16);
+static_assert(offsetof(MeshConstants, outputMode) == 28 * 16 + 12);
+static_assert(offsetof(MeshConstants, shadowNearNormalOffsetM) == 29 * 16);
+static_assert(sizeof(MeshConstants) == 30 * 16);
 
 // [POINT] 地形のスカートの下端 [m]。平面の世界と惑星の曲率の差（地形の角 28 km で 62 m）より深くする。
 constexpr float kTerrainSkirtDepthM = 500.0f;

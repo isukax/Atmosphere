@@ -327,7 +327,7 @@ int runPerf(gfx::Device& device, const gfx::PipelineLibrary& pipelines, const st
                 uint32_t t = timer.begin(cmd, "transmittance_lut_500");
                 atmo.updateTransmittanceLut(cmd, device.upload(), params, quality.transmittanceSteps);
                 timer.end(cmd, t);
-                t = timer.begin(cmd, "multiscattering_lut_20");
+                t = timer.begin(cmd, "multiscattering_lut_40");  // 既定（40 区間・2 次配置、design.md §12 Q8）
                 atmo.updateMultiScatteringLut(cmd, device.upload(), params, quality.multiScatteringSteps,
                                               atmosphere::SunTransmittanceMode::Lut, 0, gfx::kInvalidDescriptorIndex,
                                               quality.multiScatteringUniformSteps);

@@ -6,35 +6,35 @@ namespace atmosphere {
 namespace {
 
 struct TransmittanceLutConstants {
-    AtmosphereGpu atmosphere;  // c0-c5
-    uint32_t outputUav;        // c6.x
-    uint32_t width;            // c6.y
-    uint32_t height;           // c6.z
-    uint32_t stepCount;        // c6.w
-    uint32_t debugRMuUav;      // c7.x
+    AtmosphereGpu atmosphere;  // c0-c8
+    uint32_t outputUav;        // c9.x
+    uint32_t width;            // c9.y
+    uint32_t height;           // c9.z
+    uint32_t stepCount;        // c9.w
+    uint32_t debugRMuUav;      // c10.x
     uint32_t pad[3];
 };
-static_assert(offsetof(TransmittanceLutConstants, outputUav) == 6 * 16);
-static_assert(offsetof(TransmittanceLutConstants, debugRMuUav) == 7 * 16);
+static_assert(offsetof(TransmittanceLutConstants, outputUav) == 9 * 16);
+static_assert(offsetof(TransmittanceLutConstants, debugRMuUav) == 10 * 16);
 
 struct MultiScatteringLutConstants {
-    AtmosphereGpu atmosphere;           // c0-c5
-    uint32_t outputUav;                 // c6.x
-    uint32_t width;                     // c6.y
-    uint32_t height;                    // c6.z
-    uint32_t stepCount;                 // c6.w
-    uint32_t transmittanceLutSrv;       // c7.x
-    uint32_t sunTransmittanceMode;      // c7.y
-    uint32_t nestedSteps;               // c7.z
-    uint32_t debugUav;                  // c7.w
-    float transmittanceLutSize[2];      // c8.xy
-    uint32_t uniformSteps;              // c8.z
+    AtmosphereGpu atmosphere;           // c0-c8
+    uint32_t outputUav;                 // c9.x
+    uint32_t width;                     // c9.y
+    uint32_t height;                    // c9.z
+    uint32_t stepCount;                 // c9.w
+    uint32_t transmittanceLutSrv;       // c10.x
+    uint32_t sunTransmittanceMode;      // c10.y
+    uint32_t nestedSteps;               // c10.z
+    uint32_t debugUav;                  // c10.w
+    float transmittanceLutSize[2];      // c11.xy
+    uint32_t uniformSteps;              // c11.z
     float pad;
 };
-static_assert(offsetof(MultiScatteringLutConstants, outputUav) == 6 * 16);
-static_assert(offsetof(MultiScatteringLutConstants, transmittanceLutSrv) == 7 * 16);
-static_assert(offsetof(MultiScatteringLutConstants, transmittanceLutSize) == 8 * 16);
-static_assert(offsetof(MultiScatteringLutConstants, uniformSteps) == 8 * 16 + 8);
+static_assert(offsetof(MultiScatteringLutConstants, outputUav) == 9 * 16);
+static_assert(offsetof(MultiScatteringLutConstants, transmittanceLutSrv) == 10 * 16);
+static_assert(offsetof(MultiScatteringLutConstants, transmittanceLutSize) == 11 * 16);
+static_assert(offsetof(MultiScatteringLutConstants, uniformSteps) == 11 * 16 + 8);
 
 void store(float (&dst)[3], const glm::vec3& v)
 {
@@ -209,6 +209,7 @@ SkyPassConstants AtmosphereRenderer::makeSkyPassConstants(const AtmosphereParams
     c.aerialPerspectiveMsSrv = m_aerialPerspectiveMs.srvIndex();
     c.aerialPerspectiveTransmittanceUav = m_aerialPerspectiveT.uavIndex();
     c.aerialPerspectiveTransmittanceSrv = m_aerialPerspectiveT.srvIndex();
+    c.pathTraceMediumSrv = gfx::kInvalidDescriptorIndex;  // 表の媒質は PathTracer が設定する
     return c;
 }
 

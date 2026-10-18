@@ -48,6 +48,7 @@ App::App(bool debugLayer)
 
     const std::filesystem::path coefficientPath = std::filesystem::path(ATMOS_DATA_DIR) / "atmosphere_coefficients.json";
     m_coefficientSets = atmosphere::loadCoefficientSets(coefficientPath);
+    m_miePhaseTables = std::make_unique<atmosphere::MiePhaseTables>(m_device, m_coefficientSets);
     m_solarIlluminanceFromSpectrumLux = atmosphere::loadSolarIlluminanceFromSpectrumLux(coefficientPath);
     m_atmosphere = atmosphere::loadDefaultParams(coefficientPath);
     applyCoefficientSet(0);  // 先頭 = Hillaire2020（作業色空間の同期とログのため）
@@ -93,6 +94,18 @@ void App::applyCoefficientSet(int index)
     m_workingSpace = m_atmosphere.workingSpace;
     logEvent(std::format("Coefficient set: {} ({})", m_atmosphere.coefficientSet,
                          display::toString(m_workingSpace)));
+}
+
+void App::applyAerosolPreset(const std::string& name)
+{
+    const atmosphere::CoefficientSet& set = m_coefficientSets[static_cast<size_t>(m_coefficientIndex)];
+    const atmosphere::AerosolPreset* preset = set.findAerosolPreset(name);
+    if (preset == nullptr || preset->components.size() != 1) {
+        return;  // 2 成分のプリセットは Phase 4.9
+    }
+    m_atmosphere.applyAerosolPreset(*preset);
+    logEvent(std::format("Aerosol preset: {} (AOD {:.4f} {:.4f} {:.4f})", preset->name, preset->aodRgb.x,
+                         preset->aodRgb.y, preset->aodRgb.z));
 }
 
 void App::updateCamera()
@@ -565,11 +578,33 @@ void App::drawAtmosphereUi()
         const glm::vec3& oz = m_atmosphere.ozoneAbsorptionPerKm;
         ImGui::Text("Rayleigh sigma_s [1e-3/km]: %.3f %.3f %.3f", rs.x * 1e3f, rs.y * 1e3f, rs.z * 1e3f);
         ImGui::Text("Ozone sigma_a [1e-3/km]   : %.3f %.3f %.3f", oz.x * 1e3f, oz.y * 1e3f, oz.z * 1e3f);
-        ImGui::Text("Mie sigma_s / sigma_a [1e-3/km]: %.3f / %.3f", m_atmosphere.mieScatteringPerKm.x * 1e3f,
-                    m_atmosphere.mieAbsorptionPerKm.x * 1e3f);
+        // エアロゾルのプリセット（design.md §5.9）。2 成分のプリセット（D）は Phase 4.9 なので選べない
+        const atmosphere::CoefficientSet& set = m_coefficientSets[static_cast<size_t>(m_coefficientIndex)];
+        if (ImGui::BeginCombo("Aerosol preset", m_atmosphere.aerosolPreset.c_str())) {
+            for (const atmosphere::AerosolPreset& preset : set.aerosolPresets) {
+                const bool available = preset.components.size() == 1;
+                const std::string label =
+                    available ? preset.name : preset.name + " (2 components: Phase 4.9)";
+                if (ImGui::Selectable(label.c_str(), preset.name == m_atmosphere.aerosolPreset,
+                                      available ? 0 : ImGuiSelectableFlags_Disabled)) {
+                    applyAerosolPreset(preset.name);
+                }
+            }
+            ImGui::EndCombo();
+        }
+        const glm::vec3& ms = m_atmosphere.mieScatteringPerKm;
+        const glm::vec3& ma = m_atmosphere.mieAbsorptionPerKm;
+        ImGui::Text("Mie sigma_s [1e-3/km]     : %.3f %.3f %.3f", ms.x * 1e3f, ms.y * 1e3f, ms.z * 1e3f);
+        ImGui::Text("Mie sigma_a [1e-3/km]     : %.3f %.3f %.3f", ma.x * 1e3f, ma.y * 1e3f, ma.z * 1e3f);
+        ImGui::Text("Mie profile: top %.2f km, H %.2f km, phase %s", m_atmosphere.mieBoundaryLayerTopKm,
+                    m_atmosphere.mieScaleHeightKm,
+                    m_atmosphere.miePhaseTableSrv == atmosphere::kNoMiePhaseTable ? "Cornette-Shanks" : "Mie table");
         ImGui::Text("Sun color (Y=1): %.3f %.3f %.3f", m_atmosphere.sunColor.x, m_atmosphere.sunColor.y,
                     m_atmosphere.sunColor.z);
+        // [POINT] スライダーで編集できるのは base だけ（ほかのプリセットは Mie 理論・§12 の定義から作った固定の値）
+        ImGui::BeginDisabled(m_atmosphere.aerosolPreset != "base");
         ImGui::SliderFloat("Mie g", &m_atmosphere.miePhaseG, 0.0f, 0.99f, "%.2f");
+        ImGui::EndDisabled();
 
         ImGui::SeparatorText("Sun");
         ImGui::SliderFloat("Zenith [deg]", &m_atmosphere.sunZenithDeg, 0.0f, 120.0f, "%.2f");

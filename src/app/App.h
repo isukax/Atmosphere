@@ -2,6 +2,7 @@
 
 #include "app/Window.h"
 #include "atmosphere/AtmosphereRenderer.h"
+#include "atmosphere/MiePhaseTables.h"
 #include "atmosphere/PathTracer.h"
 #include "display/DisplayMonitor.h"
 #include "display/DisplayPass.h"
@@ -47,6 +48,7 @@ private:
     float exposureScale() const;
     void updateCamera();
     void applyCoefficientSet(int index);
+    void applyAerosolPreset(const std::string& name);
     void drawAtmosphereUi();
     void drawPixelPickerUi(const ImVec2& pos, float width);
     void drawGpuTimeUi(const ImVec2& pos, float width);
@@ -85,6 +87,7 @@ private:
 
     // 大気
     std::vector<atmosphere::CoefficientSet> m_coefficientSets;
+    std::unique_ptr<atmosphere::MiePhaseTables> m_miePhaseTables;  // プリセットの位相関数の表（GPU、design.md §5.9）
     int m_coefficientIndex = 0;
     atmosphere::AtmosphereParams m_atmosphere;
     atmosphere::AtmosphereQuality m_quality;  // LUT のステップ数・多重散乱の有無（既定値の理由は定義側）

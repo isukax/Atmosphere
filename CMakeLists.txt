@@ -85,6 +85,7 @@ add_executable(atmosphere
   src/app/Window.cpp
   src/atmosphere/AtmosphereParams.cpp
   src/atmosphere/AtmosphereRenderer.cpp
+  src/atmosphere/MiePhaseTables.cpp
   src/atmosphere/PathTracer.cpp
   src/gfx/Device.cpp
   src/gfx/Buffer.cpp
@@ -109,6 +110,7 @@ add_executable(atmosphere
   src/batch/Phase3Tests.cpp
   src/batch/Phase4Tests.cpp
   src/batch/Phase45Tests.cpp
+  src/batch/Phase48Tests.cpp
 )
 add_dependencies(atmosphere shaders)
 

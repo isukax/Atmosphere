@@ -23,6 +23,16 @@ void PathTracer::resize(uint32_t width, uint32_t height)
     reset();
 }
 
+void PathTracer::setMedium(const std::vector<float>& table)
+{
+    if (table.empty()) {
+        m_medium = gfx::Buffer();
+        return;
+    }
+    m_medium = gfx::Buffer(m_device, {table.size() * sizeof(float), sizeof(float), true, false, L"PathTraceMedium"});
+    m_medium.upload(m_device, table.data(), table.size() * sizeof(float), D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
+}
+
 void PathTracer::render(ID3D12GraphicsCommandList* cmd, gfx::UploadRing& upload, const AtmosphereRenderer& luts,
                         const AtmosphereParams& params, const SkyView& view, uint32_t maxDepth,
                         uint32_t samplesPerDispatch, uint32_t outputUav)
@@ -36,6 +46,7 @@ void PathTracer::render(ID3D12GraphicsCommandList* cmd, gfx::UploadRing& upload,
     c.samplesPerDispatch = samplesPerDispatch;
     c.accumulationUavA = m_accumulationA.uavIndex();
     c.accumulationUavB = m_accumulationB.uavIndex();
+    c.pathTraceMediumSrv = m_medium ? m_medium.srvIndex() : gfx::kInvalidDescriptorIndex;
 
     m_accumulationA.transition(cmd, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     m_accumulationB.transition(cmd, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);

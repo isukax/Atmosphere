@@ -38,12 +38,13 @@ struct AtmosphereQuality {
     //         地平線付近の誤差が最大 1.8%（空の輝度で 1.4%）と分かった。LUT は大気パラメータの変更時しか
     //         作り直さないので、既定を 500（誤差 0.09%）にする（design.md §14）。
     uint32_t transmittanceSteps = 500;
-    uint32_t multiScatteringSteps = 20;  // 論文の PC 設定（64 方向 × 20 区間）
-    // [POINT] Multi-scattering LUT は光線上の区間を等間隔に置く（参照実装と同じ）。Sky-View LUT・レイマーチの
-    //         2 次配置をここにも使うと、20 区間で最大誤差が 2.7% → 4.9% に悪化した（design.md §14 Phase 3）。
-    //         全高度の点から下向きを含む全方向へ積分するので、濃い空気が光線の遠い側に来る光線が多く、
-    //         カメラ側を細かくする 2 次配置が裏目に出ると考えている（理由は未検証）。
-    bool multiScatteringUniformSteps = true;
+    // [POINT] Multi-scattering LUT は 40 区間・2 次配置（design.md §12 Q8、2026-10-18 に更新）。
+    //         論文の PC 設定（20 区間・等間隔）は、今の大気（AOD ≈ 0.005）では最大誤差 2.7% で足りたが、
+    //         エアロゾルのプリセット（AOD 0.1）では 24〜34% になり、空の見た目で ΔE_ITP 0.5〜4.7 ずれた。
+    //         地表付近の濃い層を、カメラ側（LUT の点の側）を細かくする 2 次配置で拾うと、40 区間で ΔE ≤ 0.05、
+    //         今の大気でも最大誤差 1.3% になる（§14 Phase 3・Phase 4.8）。LUT は媒質の変更時しか作らない。
+    uint32_t multiScatteringSteps = 40;
+    bool multiScatteringUniformSteps = false;
     uint32_t skyViewSteps = 30;          // 論文の PC 設定
     bool multipleScattering = true;
 };

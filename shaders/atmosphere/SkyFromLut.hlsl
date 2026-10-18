@@ -115,7 +115,7 @@ void CSMain(uint3 id : SV_DispatchThreadID)
     // [POINT] Mie の単散乱は、LUT の「位相関数を除いた積分」[無次元] に、このピクセルの正確な散乱角での
     //         位相関数 p_M(θ) [sr⁻¹] を掛けて足す。LUT のテクセルより細い光輪（g → 1）も形が崩れない
     //         （Sky-View LUT に位相関数を焼き込むと、g = 0.99 でピークが縦に伸び 6〜97% に暗くなった。design.md §14）。
-    const float phaseMie = CornetteShanksPhase(gAtmosphere.miePhaseG, dot(viewDir, gSunDirection));
+    const float3 phaseMie = MiePhase(gAtmosphere, dot(viewDir, gSunDirection));
 
     if (gOutputMode == OUTPUT_CAMERA_FB && gDepthSrv != kInvalidDescriptorIndex) {
         Texture2D<float> depthTexture = ResourceDescriptorHeap[gDepthSrv];

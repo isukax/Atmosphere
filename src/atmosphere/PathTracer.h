@@ -1,6 +1,9 @@
 #pragma once
 
 #include "atmosphere/AtmosphereRenderer.h"
+#include "gfx/Buffer.h"
+
+#include <vector>
 
 namespace atmosphere {
 
@@ -14,6 +17,10 @@ public:
     void resize(uint32_t width, uint32_t height);
     /// 累積をリセットする（次の render から数え直す）。
     void reset() { m_frameIndex = 0; }
+
+    /// 表の媒質（design.md §5.8）を設定する。中身は reference/aerosol_experiment.py が書き出す float の並び
+    /// （PathTrace.hlsl の表の媒質の説明を参照）。空なら解析式の媒質（gAtmosphere）に戻す。完了まで待つ。
+    void setMedium(const std::vector<float>& table);
 
     /// 1 ディスパッチ分（チャンネルごとに `samplesPerDispatch` 本の経路）を追加し、平均を `outputUav` に書く。
     /// Transmittance LUT（太陽ディスク用）は `luts` のものを使う。
@@ -32,6 +39,7 @@ private:
     ComPtr<ID3D12PipelineState> m_pso;
     gfx::Texture m_accumulationA;  // RGBA32F: rgb = 単位照度あたり輝度の和、a = サンプル数
     gfx::Texture m_accumulationB;
+    gfx::Buffer m_medium;  // 表の媒質（StructuredBuffer<float>）。空なら解析式
     uint32_t m_width = 0;
     uint32_t m_height = 0;
     uint32_t m_frameIndex = 0;

@@ -24,56 +24,57 @@
 
 cbuffer SkyPassConstants : register(b0)
 {
-    AtmosphereParameters gAtmosphere   : packoffset(c0);   // c0-c5
-    row_major float4x4 gInvViewProjRot : packoffset(c6);   // 回転のみのビュー × 射影 の逆行列（Reverse-Z）
-    float3 gCameraPosKm                : packoffset(c10);  // 惑星座標 [km]
-    uint   gOutputUav                  : packoffset(c10.w);
-    float3 gSunDirection               : packoffset(c11);  // 太陽へ向かう単位ベクトル
-    uint   gTransmittanceLutSrv        : packoffset(c11.w);
-    float3 gSunIlluminanceLux          : packoffset(c12);  // E_sun × 太陽の色（RGB、Y = E_sun）[lx]
-    float  gExposureScale              : packoffset(c12.w); // 1/(1.2·2^EV100) [1/(cd/m²)]
-    uint   gWidth                      : packoffset(c13.x);
-    uint   gHeight                     : packoffset(c13.y);
-    uint   gStepCount                  : packoffset(c13.z);
-    uint   gSunTransmittanceMode       : packoffset(c13.w);
-    uint   gNestedSteps                : packoffset(c14.x);
-    uint   gOutputMode                 : packoffset(c14.y);
-    uint   gDirectionUav               : packoffset(c14.z);
-    uint   gMultiScatteringLutSrv      : packoffset(c14.w);
-    float2 gTransmittanceLutSize       : packoffset(c15.x);
-    float2 gMultiScatteringLutSize     : packoffset(c15.z);
-    uint   gSkyViewLutSrv              : packoffset(c16.x);
-    uint   gFlags                      : packoffset(c16.y); // SKY_FLAG_*
-    float2 gSkyViewLutSize             : packoffset(c16.z);
-    uint   gFrameIndex                 : packoffset(c17.x); // パストレーサー: 乱数の種・累積の振り分け
-    uint   gMaxDepth                   : packoffset(c17.y); // パストレーサー: 最大散乱回数
-    uint   gSamplesPerDispatch         : packoffset(c17.z); // パストレーサー: 1 回のディスパッチで追加するサンプル数
-    uint   gAccumulationUavA           : packoffset(c17.w); // パストレーサー: 累積（偶数フレーム）
-    uint   gAccumulationUavB           : packoffset(c18.x); // パストレーサー: 累積（奇数フレーム）
-    uint   gSkyViewMieLutUav           : packoffset(c18.y); // Sky-View LUT の生成: Mie の単散乱（位相関数なし）の出力
-    uint   gSkyViewMieLutSrv           : packoffset(c18.z); // LUT からの描画: 同じ LUT を読む
-    uint   gApTransmittanceMode        : packoffset(c18.w); // AP_TRANSMITTANCE_*
-    uint   gAerialPerspectiveTransmittanceUav : packoffset(c19.x); // 空気遠近法のボリューム（透過率 RGB、§5.7 の方式 2）
-    uint   gAerialPerspectiveTransmittanceSrv : packoffset(c19.y);
-    uint   gSkyIrradianceUav           : packoffset(c19.w); // 空からの照度の SH 係数（9 × float4）の出力
-    uint   gAerialPerspectiveUav       : packoffset(c20.x); // 空気遠近法のボリューム（Rayleigh + 多重散乱、A = 平均透過率）
-    uint   gAerialPerspectiveMieUav    : packoffset(c20.y); // 空気遠近法のボリューム（Mie の単散乱、位相関数なし）
-    uint   gAerialPerspectiveSrv       : packoffset(c20.z);
-    uint   gAerialPerspectiveMieSrv    : packoffset(c20.w);
-    uint   gDepthSrv                   : packoffset(c21.x); // 深度バッファ（Reverse-Z）。無効値なら地形なし
-    float  gApKmPerSlice               : packoffset(c21.y); // 空気遠近法のスライスの距離単位 [km]（参照実装と同じ 4）
-    float  gApSliceCount               : packoffset(c21.z); // 32
-    uint   gRaymarchMeanTransmittance  : packoffset(c21.w); // レイマーチで地形に掛ける透過率を RGB 平均にする（V3c の比較用）
-    row_major float4x4 gShadowFarToUvz : packoffset(c22);   // カメラ相対の位置 [m] → 全体のカスケードの (u, v, 深度)
-    uint   gShadowFarSrv               : packoffset(c26.x); // 地形の影（全体のカスケード）。無効値なら影なし（design.md §5.5）
-    uint   gShadowNearSrv              : packoffset(c26.y); // 近景のカスケード。無効値なら全体だけ
-    uint   gApShadowMethod             : packoffset(c26.z); // AP_SHADOW_*
-    uint   gApPerPixelSteps            : packoffset(c26.w); // 方式 5: 視線上で影を調べる点の数
-    row_major float4x4 gShadowNearToUvz : packoffset(c27);  // カメラ相対の位置 [m] → 近景のカスケードの (u, v, 深度)
-    float  gApShadowFilterScale        : packoffset(c31.x); // 方式 1: 円盤の半径の倍率（1 = ボクセルの半幅）
-    uint   gApPerPixelBisectSteps      : packoffset(c31.y); // 方式 5: 影の境界の二分探索の回数
-    uint   gAerialPerspectiveMsUav     : packoffset(c31.z); // 空気遠近法のボリューム（多重散乱）
-    uint   gAerialPerspectiveMsSrv     : packoffset(c31.w);
+    AtmosphereParameters gAtmosphere   : packoffset(c0);   // c0-c8
+    row_major float4x4 gInvViewProjRot : packoffset(c9);   // 回転のみのビュー × 射影 の逆行列（Reverse-Z）
+    float3 gCameraPosKm                : packoffset(c13);  // 惑星座標 [km]
+    uint   gOutputUav                  : packoffset(c13.w);
+    float3 gSunDirection               : packoffset(c14);  // 太陽へ向かう単位ベクトル
+    uint   gTransmittanceLutSrv        : packoffset(c14.w);
+    float3 gSunIlluminanceLux          : packoffset(c15);  // E_sun × 太陽の色（RGB、Y = E_sun）[lx]
+    float  gExposureScale              : packoffset(c15.w); // 1/(1.2·2^EV100) [1/(cd/m²)]
+    uint   gWidth                      : packoffset(c16.x);
+    uint   gHeight                     : packoffset(c16.y);
+    uint   gStepCount                  : packoffset(c16.z);
+    uint   gSunTransmittanceMode       : packoffset(c16.w);
+    uint   gNestedSteps                : packoffset(c17.x);
+    uint   gOutputMode                 : packoffset(c17.y);
+    uint   gDirectionUav               : packoffset(c17.z);
+    uint   gMultiScatteringLutSrv      : packoffset(c17.w);
+    float2 gTransmittanceLutSize       : packoffset(c18.x);
+    float2 gMultiScatteringLutSize     : packoffset(c18.z);
+    uint   gSkyViewLutSrv              : packoffset(c19.x);
+    uint   gFlags                      : packoffset(c19.y); // SKY_FLAG_*
+    float2 gSkyViewLutSize             : packoffset(c19.z);
+    uint   gFrameIndex                 : packoffset(c20.x); // パストレーサー: 乱数の種・累積の振り分け
+    uint   gMaxDepth                   : packoffset(c20.y); // パストレーサー: 最大散乱回数
+    uint   gSamplesPerDispatch         : packoffset(c20.z); // パストレーサー: 1 回のディスパッチで追加するサンプル数
+    uint   gAccumulationUavA           : packoffset(c20.w); // パストレーサー: 累積（偶数フレーム）
+    uint   gAccumulationUavB           : packoffset(c21.x); // パストレーサー: 累積（奇数フレーム）
+    uint   gSkyViewMieLutUav           : packoffset(c21.y); // Sky-View LUT の生成: Mie の単散乱（位相関数なし）の出力
+    uint   gSkyViewMieLutSrv           : packoffset(c21.z); // LUT からの描画: 同じ LUT を読む
+    uint   gApTransmittanceMode        : packoffset(c21.w); // AP_TRANSMITTANCE_*
+    uint   gAerialPerspectiveTransmittanceUav : packoffset(c22.x); // 空気遠近法のボリューム（透過率 RGB、§5.7 の方式 2）
+    uint   gAerialPerspectiveTransmittanceSrv : packoffset(c22.y);
+    uint   gPathTraceMediumSrv         : packoffset(c22.z); // パストレーサーの表の媒質（§5.8）。無効値なら解析式
+    uint   gSkyIrradianceUav           : packoffset(c22.w); // 空からの照度の SH 係数（9 × float4）の出力
+    uint   gAerialPerspectiveUav       : packoffset(c23.x); // 空気遠近法のボリューム（Rayleigh + 多重散乱、A = 平均透過率）
+    uint   gAerialPerspectiveMieUav    : packoffset(c23.y); // 空気遠近法のボリューム（Mie の単散乱、位相関数なし）
+    uint   gAerialPerspectiveSrv       : packoffset(c23.z);
+    uint   gAerialPerspectiveMieSrv    : packoffset(c23.w);
+    uint   gDepthSrv                   : packoffset(c24.x); // 深度バッファ（Reverse-Z）。無効値なら地形なし
+    float  gApKmPerSlice               : packoffset(c24.y); // 空気遠近法のスライスの距離単位 [km]（参照実装と同じ 4）
+    float  gApSliceCount               : packoffset(c24.z); // 32
+    uint   gRaymarchMeanTransmittance  : packoffset(c24.w); // レイマーチで地形に掛ける透過率を RGB 平均にする（V3c の比較用）
+    row_major float4x4 gShadowFarToUvz : packoffset(c25);   // カメラ相対の位置 [m] → 全体のカスケードの (u, v, 深度)
+    uint   gShadowFarSrv               : packoffset(c29.x); // 地形の影（全体のカスケード）。無効値なら影なし（design.md §5.5）
+    uint   gShadowNearSrv              : packoffset(c29.y); // 近景のカスケード。無効値なら全体だけ
+    uint   gApShadowMethod             : packoffset(c29.z); // AP_SHADOW_*
+    uint   gApPerPixelSteps            : packoffset(c29.w); // 方式 5: 視線上で影を調べる点の数
+    row_major float4x4 gShadowNearToUvz : packoffset(c30);  // カメラ相対の位置 [m] → 近景のカスケードの (u, v, 深度)
+    float  gApShadowFilterScale        : packoffset(c34.x); // 方式 1: 円盤の半径の倍率（1 = ボクセルの半幅）
+    uint   gApPerPixelBisectSteps      : packoffset(c34.y); // 方式 5: 影の境界の二分探索の回数
+    uint   gAerialPerspectiveMsUav     : packoffset(c34.z); // 空気遠近法のボリューム（多重散乱）
+    uint   gAerialPerspectiveMsSrv     : packoffset(c34.w);
 };
 
 // 定数の地形の影（2 段のカスケード）

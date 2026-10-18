@@ -68,7 +68,7 @@ void CSMain(uint3 thread : SV_GroupThreadID)
         const float solidAngle = sin(theta) * (2.0 * kPi * u / kMieThetaCount) * (2.0 * kPi / kMiePhiCount);
         const float3 dir = cos(theta) * gSunDirection + sin(theta) * (cos(phi) * tangent + sin(phi) * bitangent);
         SampleSkyViewLuts(gCameraPosKm, dir, rayleighAndMs, mieNoPhase);
-        Accumulate(sum, dir, mieNoPhase * (CornetteShanksPhase(gAtmosphere.miePhaseG, cos(theta)) * solidAngle));
+        Accumulate(sum, dir, mieNoPhase * (MiePhase(gAtmosphere, cos(theta)) * solidAngle));
     }
     [unroll] for (uint k3 = 0; k3 < kShCount; ++k3) {
         gsSum[k3][thread.x] = sum[k3];

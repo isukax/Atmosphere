@@ -8,8 +8,10 @@
 #include <glm/matrix.hpp>
 #include <glm/trigonometric.hpp>
 
+#include <algorithm>
 #include <cstring>
 #include <format>
+#include <fstream>
 #include <functional>
 
 namespace batch {
@@ -128,10 +130,13 @@ int runMultiScattering(gfx::Device& device, const gfx::PipelineLibrary& pipeline
         uint32_t steps;
         atmosphere::SunTransmittanceMode mode;
         uint32_t nestedSteps;
+        bool uniform;
     };
+    const atmosphere::AtmosphereQuality quality;
     const Variant variants[] = {
-        {"reference", 256, atmosphere::SunTransmittanceMode::Nested, 256},  // 検証対象（LUT なし・多ステップ）
-        {"default", 20, atmosphere::SunTransmittanceMode::Lut, 0},          // 実用設定（参考値）
+        {"reference", 256, atmosphere::SunTransmittanceMode::Nested, 256, true},  // 検証対象（LUT なし・多ステップ）
+        {"default", quality.multiScatteringSteps, atmosphere::SunTransmittanceMode::Lut, 0,
+         quality.multiScatteringUniformSteps},  // 実用設定（参考値。2026-10-18 から 40 区間・2 次配置）
     };
     for (const Variant& v : variants) {
         device.upload().beginSlot(0);
@@ -139,7 +144,7 @@ int runMultiScattering(gfx::Device& device, const gfx::PipelineLibrary& pipeline
             debug.transition(cmd, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
             renderer.updateTransmittanceLut(cmd, device.upload(), params, 500);
             renderer.updateMultiScatteringLut(cmd, device.upload(), params, v.steps, v.mode, v.nestedSteps,
-                                              debug.uavIndex());
+                                              debug.uavIndex(), v.uniform);
         });
         io::saveExr(outDir / std::format("ms_{}.exr", v.name), n, n,
                     toFloats(renderer.multiScatteringLut().readback(device, 16)),
@@ -148,7 +153,7 @@ int runMultiScattering(gfx::Device& device, const gfx::PipelineLibrary& pipeline
                      {"step_count", v.steps},
                      {"sun_transmittance", v.mode == atmosphere::SunTransmittanceMode::Nested ? "nested" : "lut500"},
                      {"nested_steps", v.nestedSteps},
-                     {"step_distribution", "uniform"},
+                     {"step_distribution", v.uniform ? "uniform" : "quadratic"},
                      {"atmosphere", atmosphere::toJson(params)}});
     }
     io::saveExr(outDir / "ms_r_musun.exr", n, n, toFloats(debug.readback(device, 16)),
@@ -181,7 +186,7 @@ int runSkyLut(gfx::Device& device, const gfx::PipelineLibrary& pipelines, const 
 {
     atmosphere::AtmosphereRenderer renderer(device, pipelines, DXGI_FORMAT_R32G32B32A32_FLOAT);
     PerLuxTarget target(device, kGridWidth, kGridHeight);
-    const atmosphere::AtmosphereQuality quality;  // 既定（T 500 / MS 20 / Sky-View 30、多重散乱あり）
+    const atmosphere::AtmosphereQuality quality;  // 既定（T 500 / MS 40・2 次配置 / Sky-View 30、多重散乱あり）
     for (const Scenario& s : kScenarios) {
         const atmosphere::AtmosphereParams params = scenarioParams(s);
         const glm::vec3 camera = cameraPosKm(params, s.altitudeKm);
@@ -387,6 +392,215 @@ int runSunCloseup(gfx::Device& device, const gfx::PipelineLibrary& pipelines, co
     return 0;
 }
 
+// ---------------------------------------------------------------------------
+// V4b（design.md §5.8）: 表の媒質（現実的なエアロゾル）のパストレース
+// ---------------------------------------------------------------------------
+
+/// [POINT] 媒質は Python（reference/validate_v4b.py → aerosol_experiment.py）が outDir/media に書き出す。
+///         index.json = [{"name", "file", "floats"}]、file は float32（リトルエンディアン）の並び。
+std::vector<std::pair<std::string, std::vector<float>>> loadMedia(const std::filesystem::path& dir)
+{
+    std::vector<std::pair<std::string, std::vector<float>>> media;
+    std::ifstream indexFile(dir / "index.json");
+    if (!indexFile) {
+        gfx::log("pathtrace_aerosol: media/index.json not found in " + dir.string());
+        return media;
+    }
+    const nlohmann::json index = nlohmann::json::parse(indexFile);
+    for (const nlohmann::json& entry : index) {
+        const size_t count = entry["floats"].get<size_t>();
+        std::vector<float> table(count);
+        std::ifstream bin(dir / entry["file"].get<std::string>(), std::ios::binary);
+        bin.read(reinterpret_cast<char*>(table.data()), static_cast<std::streamsize>(count * sizeof(float)));
+        if (!bin) {
+            gfx::log("pathtrace_aerosol: failed to read " + entry["file"].get<std::string>());
+            return {};
+        }
+        media.emplace_back(entry["name"].get<std::string>(), std::move(table));
+    }
+    return media;
+}
+
+int runPathTraceAerosol(gfx::Device& device, const gfx::PipelineLibrary& pipelines,
+                        const std::filesystem::path& outDir)
+{
+    const auto media = loadMedia(outDir / "media");
+    if (media.empty()) {
+        return 1;
+    }
+    atmosphere::AtmosphereRenderer renderer(device, pipelines, DXGI_FORMAT_R32G32B32A32_FLOAT);
+    atmosphere::PathTracer tracer(device, pipelines);
+    PerLuxTarget target(device, kGridWidth, kGridHeight);
+
+    // V4 の 4 シナリオ + 低い太陽 + 高度 3 km（research.md §12 で鉛直分布が最も効いた条件）
+    constexpr Scenario kV4bScenarios[] = {
+        {"day", 0.2f, 45.0f},     {"low_sun", 0.2f, 80.0f},   {"sunset", 0.2f, 89.0f},
+        {"earth_shadow", 0.2f, 96.0f}, {"day_10km", 10.0f, 45.0f}, {"altitude_3km", 3.0f, 80.0f},
+    };
+    constexpr uint32_t kSamplesPerDispatch = 64;
+    constexpr uint32_t kCloseupSize = 64;
+    constexpr float kCloseupFovDeg = 12.0f;  // 太陽の周り ±6°
+    gfx::Texture closeup(device, {kCloseupSize, kCloseupSize, DXGI_FORMAT_R32G32B32A32_FLOAT, false, true, false,
+                                  L"PathTraceAerosolCloseup"});
+
+    // 全天（正距円筒）のパストレース。累積（偶数・奇数フレーム）も保存してノイズを見積もれるようにする
+    auto traceGrid = [&](const atmosphere::AtmosphereParams& params, const glm::vec3& camera, uint32_t maxDepth,
+                         uint32_t dispatches, const std::filesystem::path& stem, nlohmann::json meta) {
+        tracer.resize(kGridWidth, kGridHeight);
+        for (uint32_t i = 0; i < dispatches; ++i) {
+            target.render([&](ID3D12GraphicsCommandList* cmd, uint32_t uav) {
+                tracer.render(cmd, device.upload(), renderer, params, target.view(camera), maxDepth,
+                              kSamplesPerDispatch, uav);
+            });
+        }
+        meta["path"] = "path_trace";
+        meta["max_depth"] = maxDepth;
+        meta["samples_per_channel"] = tracer.samplesPerChannel();
+        target.save(stem.string() + ".exr", meta);
+        io::saveExr(stem.string() + "_accA.exr", kGridWidth, kGridHeight,
+                    toFloats(tracer.accumulationA().readback(device, 16)), {{"units", "sum (rgb), count (a)"}});
+        io::saveExr(stem.string() + "_accB.exr", kGridWidth, kGridHeight,
+                    toFloats(tracer.accumulationB().readback(device, 16)), {{"units", "sum (rgb), count (a)"}});
+    };
+
+    // 太陽の周り ±6°（カメラ視点。露出 1/E_sun で fb = 単位照度あたりの輝度。太陽の色は白の係数セット）
+    auto traceCloseup = [&](const atmosphere::AtmosphereParams& params, const glm::vec3& camera, uint32_t dispatches,
+                            const std::filesystem::path& stem, nlohmann::json meta) {
+        scene::Camera cam;
+        cam.yawRad = glm::radians(90.0f);  // +X（太陽の方位 0°）を向く
+        cam.pitchRad = glm::radians(90.0f - params.sunZenithDeg);
+        cam.verticalFovRad = glm::radians(kCloseupFovDeg);
+        atmosphere::SkyView view;
+        view.invViewProjRot = glm::inverse(cam.projection(1.0f) * cam.viewRotation());
+        view.cameraPosKm = camera;
+        view.exposureScale = 1.0f / params.sunIlluminanceLux;
+        view.sunDisk = false;
+        tracer.resize(kCloseupSize, kCloseupSize);
+        for (uint32_t i = 0; i < dispatches; ++i) {
+            device.upload().beginSlot(0);
+            device.executeImmediate([&](ID3D12GraphicsCommandList* cmd) {
+                closeup.transition(cmd, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                tracer.render(cmd, device.upload(), renderer, params, view, 32, kSamplesPerDispatch,
+                              closeup.uavIndex());
+            });
+        }
+        meta["path"] = "path_trace";
+        meta["max_depth"] = 32;
+        meta["samples_per_channel"] = tracer.samplesPerChannel();
+        meta["camera_yaw_deg"] = 90.0f;
+        meta["camera_pitch_deg"] = 90.0f - params.sunZenithDeg;
+        meta["vertical_fov_deg"] = kCloseupFovDeg;
+        meta["units"] = "luminance per illuminance [sr^-1]";
+        io::saveExr(stem.string() + ".exr", kCloseupSize, kCloseupSize, toFloats(closeup.readback(device, 16)), meta);
+    };
+
+    for (size_t mi = 0; mi < media.size(); ++mi) {
+        const auto& [mediumName, table] = media[mi];
+        tracer.setMedium(table);
+        for (const Scenario& s : kV4bScenarios) {
+            atmosphere::AtmosphereParams params = scenarioParams(s);  // 地表アルベド 0（V4 と同じ）
+            const glm::vec3 camera = cameraPosKm(params, s.altitudeKm);
+            nlohmann::json meta = baseMeta(params, s);
+            meta["medium"] = mediumName;
+            const std::filesystem::path stem = outDir / std::format("{}_{}", mediumName, s.name);
+            traceGrid(params, camera, 1, 256, stem.string() + "_pt_single", meta);   // 散乱 1 回（V4b-1）
+            traceGrid(params, camera, 32, 1024, stem.string() + "_pt", meta);         // 散乱 32 回（V4b-2）
+            if (mi == 0) {
+                target.saveDirections(outDir / std::format("{}_directions.exr", s.name));
+            }
+            // [POINT] 散乱回数の打ち切りの確認: 目標の大気（最後の媒質）の低い太陽で、最大 64 回とも比べる
+            if (mi + 1 == media.size() && std::string_view(s.name) == "low_sun") {
+                traceGrid(params, camera, 64, 1024, stem.string() + "_pt64", meta);
+            }
+            if (std::string_view(s.name) == "low_sun" || std::string_view(s.name) == "sunset") {
+                traceCloseup(params, camera, 1024, stem.string() + "_closeup_pt", meta);
+            }
+            gfx::log(std::format("pathtrace_aerosol: {} {}", mediumName, s.name));
+        }
+    }
+    tracer.setMedium({});
+    return 0;
+}
+
+/// V4b の見た目の比較: 目標の大気（C+A+B+D）で、太陽の方と反対の画面（画角 50°）をパストレースする。
+/// [POINT] V4b-2 と違い、地表アルベドは既定の 0.3（地面を照らす条件）。比べる近似は Python が描く
+///         （reference/compare_v4b_views.py。Ψ_ms も同じアルベドで作る）。
+int runPathTraceAerosolViews(gfx::Device& device, const gfx::PipelineLibrary& pipelines,
+                             const std::filesystem::path& outDir)
+{
+    const auto media = loadMedia(outDir / "media");
+    const auto medium = std::find_if(media.begin(), media.end(), [](const auto& m) { return m.first == "C_A_B_D"; });
+    if (medium == media.end()) {
+        gfx::log("pathtrace_aerosol_views: medium C_A_B_D not found");
+        return 1;
+    }
+    atmosphere::AtmosphereRenderer renderer(device, pipelines, DXGI_FORMAT_R32G32B32A32_FLOAT);
+    atmosphere::PathTracer tracer(device, pipelines);
+    tracer.setMedium(medium->second);
+
+    struct ViewScenario {
+        Scenario scenario;
+        float pitchDeg;  // 画面の中心の仰角（research.md §12 の画面と同じ。高度 10 km は地平線の下が入るように）
+    };
+    constexpr ViewScenario kViews[] = {
+        {{"day", 0.2f, 45.0f}, 10.0f},          {{"low_sun", 0.2f, 80.0f}, 5.0f},
+        {{"sunset", 0.2f, 89.0f}, 3.0f},        {{"day_10km", 10.0f, 45.0f}, -5.0f},
+        {{"altitude_3km", 3.0f, 80.0f}, -3.0f},
+    };
+    constexpr uint32_t kWidth = 320;
+    constexpr uint32_t kHeight = 180;
+    constexpr float kFovDeg = 50.0f;
+    constexpr uint32_t kSamplesPerDispatch = 64;
+    constexpr uint32_t kDispatches = 256;  // チャンネルあたり 16,384 経路
+    gfx::Texture image(device, {kWidth, kHeight, DXGI_FORMAT_R32G32B32A32_FLOAT, false, true, false,
+                                L"PathTraceAerosolView"});
+
+    for (const ViewScenario& v : kViews) {
+        atmosphere::AtmosphereParams params = scenarioParams(v.scenario);
+        params.groundAlbedo = atmosphere::AtmosphereParams{}.groundAlbedo;
+        const glm::vec3 camera = cameraPosKm(params, v.scenario.altitudeKm);
+        for (const auto& [side, yawDeg] : {std::pair{"front", 90.0f}, std::pair{"back", -90.0f}}) {
+            scene::Camera cam;
+            cam.yawRad = glm::radians(yawDeg);  // 90° で +X（太陽の方位 0°）を向く
+            cam.pitchRad = glm::radians(v.pitchDeg);
+            cam.verticalFovRad = glm::radians(kFovDeg);
+            atmosphere::SkyView view;
+            view.invViewProjRot =
+                glm::inverse(cam.projection(float(kWidth) / float(kHeight)) * cam.viewRotation());
+            view.cameraPosKm = camera;
+            view.exposureScale = 1.0f / params.sunIlluminanceLux;
+            view.sunDisk = false;
+            tracer.resize(kWidth, kHeight);
+            for (uint32_t i = 0; i < kDispatches; ++i) {
+                device.upload().beginSlot(0);
+                device.executeImmediate([&](ID3D12GraphicsCommandList* cmd) {
+                    image.transition(cmd, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                    tracer.render(cmd, device.upload(), renderer, params, view, 32, kSamplesPerDispatch,
+                                  image.uavIndex());
+                });
+            }
+            nlohmann::json meta = baseMeta(params, v.scenario);
+            meta["medium"] = medium->first;
+            meta["path"] = "path_trace";
+            meta["max_depth"] = 32;
+            meta["samples_per_channel"] = tracer.samplesPerChannel();
+            meta["camera_yaw_deg"] = yawDeg;
+            meta["camera_pitch_deg"] = v.pitchDeg;
+            meta["vertical_fov_deg"] = kFovDeg;
+            meta["units"] = "luminance per illuminance [sr^-1]";
+            const std::string stem = (outDir / std::format("{}_{}_{}", medium->first, v.scenario.name, side)).string();
+            io::saveExr(stem + "_pt.exr", kWidth, kHeight, toFloats(image.readback(device, 16)), meta);
+            io::saveExr(stem + "_pt_accA.exr", kWidth, kHeight, toFloats(tracer.accumulationA().readback(device, 16)),
+                        {{"units", "sum (rgb), count (a)"}});
+            io::saveExr(stem + "_pt_accB.exr", kWidth, kHeight, toFloats(tracer.accumulationB().readback(device, 16)),
+                        {{"units", "sum (rgb), count (a)"}});
+            gfx::log(std::format("pathtrace_aerosol_views: {} {}", v.scenario.name, side));
+        }
+    }
+    tracer.setMedium({});
+    return 0;
+}
+
 } // namespace
 
 int runPhase3Test(gfx::Device& device, const gfx::PipelineLibrary& pipelines, std::string_view name,
@@ -401,6 +615,12 @@ int runPhase3Test(gfx::Device& device, const gfx::PipelineLibrary& pipelines, st
     }
     if (name == "pathtrace") {
         return runPathTrace(device, pipelines, outDir);
+    }
+    if (name == "pathtrace_aerosol") {
+        return runPathTraceAerosol(device, pipelines, outDir);
+    }
+    if (name == "pathtrace_aerosol_views") {
+        return runPathTraceAerosolViews(device, pipelines, outDir);
     }
     if (name == "sun_closeup") {
         return runSunCloseup(device, pipelines, outDir);

@@ -14,6 +14,24 @@
 #define SUN_TRANSMITTANCE_LUT 0
 #define SUN_TRANSMITTANCE_NESTED 1
 
+// Mie の位相関数の表の点の数（θ = π·u²、u は 0〜1 の等間隔。reference/aerosol_models.py の PHASE_TABLE_COUNT）
+static const uint kMiePhaseTableCount = 2049;
+
+// Mie の位相関数 [sr⁻¹]（RGB）。表があれば表（design.md §5.9、エアロゾルのプリセット）、なければ Cornette-Shanks。
+// [POINT] 表は θ = π·u² で刻む（前方のピークを細かく）。u = √(θ/π) で線形補間する（パストレーサーの表の媒質・
+//         Python の PhaseTable と同じ補間）。
+float3 MiePhase(AtmosphereParameters a, float cosTheta)
+{
+    if (a.miePhaseTableSrv == kInvalidDescriptorIndex) {
+        return CornetteShanksPhase(a.miePhaseG, cosTheta).xxx;
+    }
+    StructuredBuffer<float4> table = ResourceDescriptorHeap[a.miePhaseTableSrv];
+    const float u = sqrt(acos(clamp(cosTheta, -1.0, 1.0)) / kPi);
+    const float f = u * float(kMiePhaseTableCount - 1);
+    const uint i = min(uint(f), kMiePhaseTableCount - 2);
+    return lerp(table[i].rgb, table[i + 1].rgb, f - float(i));
+}
+
 struct AtmosphereLuts
 {
     uint   transmittanceSrv;
@@ -84,7 +102,7 @@ struct IntegrationSettings
     bool multipleScattering;    // σs·Ψ_ms（Multi-scattering LUT）を加える
     bool isotropicPhase;        // 位相関数を 1/(4π) にする（Multi-scattering LUT の生成用）
     bool groundRadiance;        // 地表に当たったら地表のランバート反射を加える（Multi-scattering LUT の生成用）
-    bool uniformSteps;          // true: 区間を等間隔に置く（Multi-scattering LUT）/ false: 2 次配置（Sky-View LUT・レイマーチ）
+    bool uniformSteps;          // true: 区間を等間隔に置く（比較用）/ false: 2 次配置（既定。全パス）
     bool separateMiePhase;      // true: Mie の単散乱を luminance に入れず、位相関数なしで mieSingleNoPhase に分ける（Sky-View LUT・空気遠近法用）
     float maxDistanceKm;        // 積分する距離の上限 [km]（地形・空気遠近法のボクセルまで）。上限なしは kNoDistanceLimitKm
     // 不透明物（地形）の太陽の影（design.md §5.5）。farSrv が無効値なら影なし。光線の原点がカメラのときだけ使える
@@ -186,14 +204,15 @@ ScatteringResult IntegrateScatteredLuminance(AtmosphereParameters a, AtmosphereL
 
     const float cosTheta = dot(dir, sunDir);
     const float phaseRayleigh = s.isotropicPhase ? kIsotropicPhase : RayleighPhase(cosTheta);
-    const float phaseMie = s.isotropicPhase ? kIsotropicPhase : CornetteShanksPhase(a.miePhaseG, cosTheta);
+    const float3 phaseMie = s.isotropicPhase ? kIsotropicPhase.xxx : MiePhase(a, cosTheta);
 
     // [POINT] 光線上のサンプル配置（区間端）。LUT のマッピング（テクセル ↔ 方向）とは別の話。
     //   2 次配置 t_k = (k/N)²（Sky-View LUT・レイマーチ）: カメラの近くを細かくする。地表付近の Mie は
     //     スケールハイト 1.2 km で急減するので、等間隔（Sky-View LUT の 30 区間で 1 区間 ~5 km）だと最初の区間の
     //     中点で密度を過小評価し、太陽の周りの光輪が 10〜19% 暗くなった（Phase 3 の V3 で発見）。
-    //   等間隔 t_k = k/N（Multi-scattering LUT）: 全高度の点から下向きを含む全方向に積分するので、2 次配置では
-    //     かえって誤差が増えた（20 区間で最大 2.7% → 4.9%、design.md §14）。
+    //   Multi-scattering LUT も既定は 2 次配置（40 区間、design.md §12 Q8）。今の大気の 20 区間では等間隔のほうが
+    //     誤差が小さかった（2.7% vs 4.9%）が、エアロゾルのプリセット（AOD 0.1）では等間隔だと地表付近の濃い層を
+    //     粗く刻み、Ψ_ms が最大 24〜34% ずれた（§14 Phase 4.8）。等間隔 t_k = k/N は比較用に残す。
     // 参照実装（sebh/UnrealEngineSkyAtmosphere）も 2 次配置は Sky-View LUT と画面のレイマーチだけで、そこでは
     // 区間数も光線の長さで変える。本実装は区間数を固定し、区間内のサンプル位置は中点（参照実装は 0.3）。
     const float range = tEnd - tStart;

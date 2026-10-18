@@ -7,13 +7,16 @@
 //     Phase 3: multiscattering, sky_lut, sun_closeup, pathtrace, spectral
 //     Phase 4: aerial_perspective, sky_irradiance, perf（perf は Release で実行する）
 //     Phase 4.6: ap_transmittance
+//     Phase 4.7: pathtrace_aerosol（媒質は reference/validate_v4b.py が書き出す）、pathtrace_aerosol_views
 //     Phase 4.5: shadow_surface, shadow_aerial_perspective, shadow_ap_methods
+//     Phase 4.8: aerosol_presets（比較は reference/validate_phase4_8.py）
 #include "app/App.h"
 #include "batch/Phase1Tests.h"
 #include "batch/Phase2Tests.h"
 #include "batch/Phase3Tests.h"
-#include "batch/Phase4Tests.h"
 #include "batch/Phase45Tests.h"
+#include "batch/Phase48Tests.h"
+#include "batch/Phase4Tests.h"
 
 #include <iostream>
 #include <string>
@@ -53,6 +56,9 @@ int main(int argc, char** argv)
             }
             if (test == "shadow_surface" || test == "shadow_aerial_perspective" || test == "shadow_ap_methods") {
                 return batch::runPhase45Test(device, pipelines, test, outDir);
+            }
+            if (test == "aerosol_presets") {
+                return batch::runPhase48Test(device, pipelines, test, outDir);
             }
             return batch::runPhase3Test(device, pipelines, test, outDir);
         }

@@ -11,13 +11,39 @@
 #include "display/ColorSpace.h"
 
 #include <glm/vec3.hpp>
+#include <glm/vec4.hpp>
 #include <nlohmann/json_fwd.hpp>
 
+#include <cstdint>
 #include <filesystem>
 #include <string>
 #include <vector>
 
 namespace atmosphere {
+
+/// GPU に上げた位相関数の表がないこと（gfx::kInvalidDescriptorIndex と同じ値。シェーダーは Cornette-Shanks を使う）
+inline constexpr uint32_t kNoMiePhaseTable = 0xFFFFFFFFu;
+/// 位相関数の表の点の数（θ = π·u²。shaders/atmosphere/AtmosphereIntegrate.hlsli の kMiePhaseTableCount）
+inline constexpr uint32_t kMiePhaseTableCount = 2049;
+
+/// エアロゾルのプリセットの Mie の 1 成分（design.md §5.9）。
+struct MieComponentPreset {
+    std::string name;
+    glm::vec3 scatteringPerKm{0.0f};  // 鉛直分布の値が 1 のところ
+    glm::vec3 absorptionPerKm{0.0f};
+    float boundaryLayerTopKm = 0.0f;  // 鉛直分布 ρ(h) = exp(−max(h − h_top, 0)/H)
+    float scaleHeightKm = 1.2f;
+    float phaseG = 0.8f;  // Cornette-Shanks の g。表のときは平均の余弦（G。パストレーサーのサンプリング用）
+    std::vector<glm::vec4> phaseTable;          // 位相関数の表 [sr⁻¹]（RGB + 0）。空なら Cornette-Shanks
+    uint32_t phaseTableSrv = kNoMiePhaseTable;  // GPU に上げた表（MiePhaseTables が設定する）
+};
+
+/// エアロゾルのプリセット（research.md §12 の変種。base / C / C+A / C+B / C+A+B / C+D / C+A+B+D）。
+struct AerosolPreset {
+    std::string name;
+    glm::vec3 aodRgb{0.0f};  // 参考: 鉛直の光学的厚さ（RGB）
+    std::vector<MieComponentPreset> components;
+};
 
 /// data/atmosphere_coefficients.json の 1 セット（reference/derive_coefficients.py が生成）。
 struct CoefficientSet {
@@ -28,6 +54,9 @@ struct CoefficientSet {
     float mieAbsorptionPerKm = 0.0f;
     glm::vec3 ozoneAbsorptionPerKm{0.0f};
     glm::vec3 sunColor{1.0f};  // 作業色空間の RGB、輝度 Y = 1
+    std::vector<AerosolPreset> aerosolPresets;  // 作業色空間ごとに持つ（B の係数・A の位相関数の RGB が変わるため）
+
+    const AerosolPreset* findAerosolPreset(const std::string& presetName) const;
 };
 
 /// [POINT] 係数はアプリに手書きしない。Python で分光データから導出した JSON を読む（§2.6）。
@@ -45,7 +74,9 @@ struct AtmosphereParams {
     glm::vec3 mieScatteringPerKm{3.996e-3f};
     glm::vec3 mieAbsorptionPerKm{0.444e-3f};
     float mieScaleHeightKm = 1.2f;
-    float miePhaseG = 0.8f;
+    float mieBoundaryLayerTopKm = 0.0f;            // 0 なら指数分布（design.md §5.9）
+    float miePhaseG = 0.8f;                        // Cornette-Shanks の g（表のときは平均の余弦）
+    uint32_t miePhaseTableSrv = kNoMiePhaseTable;  // 位相関数の表（GPU）。無効値なら Cornette-Shanks
     glm::vec3 ozoneAbsorptionPerKm{0.650e-3f, 1.881e-3f, 0.085e-3f};
     float ozoneCenterKm = 25.0f;
     float ozoneHalfWidthKm = 15.0f;
@@ -64,10 +95,15 @@ struct AtmosphereParams {
     float originAltitudeM = 0.0f;
     // 係数の由来
     std::string coefficientSet = "Hillaire2020";
+    std::string aerosolPreset = "base";  // [POINT] 係数セットを替えても、同じ名前のプリセットを選び直す
     display::WorkingColorSpace workingSpace = display::WorkingColorSpace::Rec709;
 
     /// 係数セットの値（Rayleigh・Mie・オゾン・太陽の色・作業色空間）で上書きする。
+    /// セットに aerosolPreset と同じ名前のプリセットがあれば、Mie はそのプリセットの値にする。
     void applyCoefficientSet(const CoefficientSet& set);
+    /// エアロゾルのプリセットの Mie の値で上書きする（Phase 4.8 は 1 成分のプリセットだけ。2 成分は例外）。
+    /// 位相関数の表のプリセットは、表を GPU に上げてあること（MiePhaseTables）。そうでなければ例外。
+    void applyAerosolPreset(const AerosolPreset& preset);
     /// 太陽へ向かう単位ベクトル（ワールド = 惑星座標の向き。+Y が天頂）。
     glm::vec3 sunDirection() const;
 };
@@ -88,11 +124,19 @@ struct AtmosphereGpu {
     float ozoneAbsorptionPerKm[3];
     float sunAngularRadiusRad;
     float groundAlbedo[3];
-    float pad0;
+    float mieBoundaryLayerTopKm;
+    uint32_t miePhaseTableSrv;
+    uint32_t mieComponentCount;
+    float mie1BoundaryLayerTopKm;  // 以下、2 つ目の Mie の成分（Phase 4.9 で使う。今は 0）
+    float mie1ScaleHeightKm;
+    float mie1ScatteringPerKm[3];
+    float mie1PhaseG;
+    float mie1ExtinctionPerKm[3];
+    uint32_t mie1PhaseTableSrv;
 
     bool operator==(const AtmosphereGpu&) const = default;
 };
-static_assert(sizeof(AtmosphereGpu) == 6 * 16);
+static_assert(sizeof(AtmosphereGpu) == 9 * 16);
 
 /// 既定のパラメータ: 係数セット "Hillaire2020" を適用し、太陽照度を JSON のスペクトル由来の値にする。
 AtmosphereParams loadDefaultParams(const std::filesystem::path& coefficientPath);
