@@ -25,15 +25,18 @@ std::vector<float> toFloats(const std::vector<uint8_t>& bytes)
     return out;
 }
 
-/// 検証する係数セットとプリセット（1 成分）。A・B を含まない C・C+A は色空間で Mie が変わらないので Hillaire2020 だけ
+/// 検証する係数セットとプリセット（1 成分）。B を含まないもの（base+A・C・C+A）は色空間で Mie が変わらないので
+/// Hillaire2020 だけ
 struct Combo {
     const char* set;
     const char* preset;
 };
 constexpr Combo kCombos[] = {
-    {"Hillaire2020", "C"},      {"Hillaire2020", "C+A"},     {"Hillaire2020", "C+B"},
-    {"Hillaire2020", "C+A+B"},  {"SpectralFit709", "C+B"},   {"SpectralFit709", "C+A+B"},
-    {"SpectralFit2020", "C+B"}, {"SpectralFit2020", "C+A+B"},
+    {"Hillaire2020", "C"},         {"Hillaire2020", "C+A"},        {"Hillaire2020", "C+B"},
+    {"Hillaire2020", "C+A+B"},     {"SpectralFit709", "C+B"},      {"SpectralFit709", "C+A+B"},
+    {"SpectralFit2020", "C+B"},    {"SpectralFit2020", "C+A+B"},   {"Hillaire2020", "base+A"},
+    {"Hillaire2020", "base+B"},    {"Hillaire2020", "base+A+B"},   {"SpectralFit709", "base+B"},
+    {"SpectralFit709", "base+A+B"}, {"SpectralFit2020", "base+B"}, {"SpectralFit2020", "base+A+B"},
 };
 
 /// ファイル名: "+" を "_" に（"C+A+B" → "C_A_B"）

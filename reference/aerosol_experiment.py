@@ -15,7 +15,11 @@ GPU の実装の前に、Python だけで「どの案が見た目に効くか」
 
 変種（案の切り替え）:
   base        今の既定（Hillaire 2020: AOD550 ≈ 0.005、灰色、Cornette-Shanks g = 0.8、指数 H = 1.2 km）
-  base+A      base の量のまま、位相関数を Mie（二峰性の粒径分布）に替える
+  base+A      base の量（AOD550）のまま、位相関数を Mie（二峰性の粒径分布、550 nm の値を全チャンネルに）に替える
+  base+B      base の量のまま、Mie の係数の波長依存（位相関数は Cornette-Shanks のまま）
+  base+A+B    base の量のまま、Mie の位相関数と係数をチャンネルごとに
+              （base 系は C 系と同じ作り方で、単散乱アルベドは Mie 理論の値。2026-10-18 までの base+A は base の
+              σs・σa のまま位相関数だけを替えていた。research.md §12.3 の表はその値）
   C           量だけを現実的に（AOD550 = 0.1）。ほかは base と同じ
   C+A         C + Mie の位相関数（550 nm の値を全チャンネルに）
   C+B         C + Mie の係数の波長依存（位相関数は Cornette-Shanks のまま）
@@ -441,8 +445,8 @@ def main() -> int:
             auto = exposure_for(renders[(vname, "front")])
             disp[(vname, view, "fixed")] = to_display(img, fixed)
             disp[(vname, view, "auto")] = to_display(img, auto)
-        pairs = [("base", "base+A"), ("base", "C"), ("C", "C+A"), ("C", "C+B"), ("C", "C+D"), ("C", "C+A+B"),
-                 ("C", "C+A+B+D"), ("base", "C+A+B+D")]
+        pairs = [("base", "base+A"), ("base", "base+B"), ("base", "base+A+B"), ("base", "C"), ("C", "C+A"),
+                 ("C", "C+B"), ("C", "C+D"), ("C", "C+A+B"), ("C", "C+A+B+D"), ("base", "C+A+B+D")]
         for a, b in pairs:
             if a not in variants or b not in variants:
                 continue

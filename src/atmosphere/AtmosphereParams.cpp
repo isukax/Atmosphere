@@ -163,6 +163,12 @@ void AtmosphereParams::applyAerosolPreset(const AerosolPreset& preset)
     miePhaseG = c.phaseG;
     miePhaseTableSrv = c.phaseTable.empty() ? kNoMiePhaseTable : c.phaseTableSrv;
     aerosolPreset = preset.name;
+    aerosolPresetModified = false;
+}
+
+std::string AtmosphereParams::aerosolPresetLabel() const
+{
+    return aerosolPresetModified ? aerosolPreset + " (modified)" : aerosolPreset;
 }
 
 glm::vec3 AtmosphereParams::sunDirection() const
@@ -220,7 +226,8 @@ nlohmann::json toJson(const AtmosphereParams& p)
         {"mie_boundary_layer_top_km", p.mieBoundaryLayerTopKm},
         {"mie_phase_g", p.miePhaseG},
         {"mie_phase_model", p.miePhaseTableSrv == kNoMiePhaseTable ? "cornette_shanks" : "table"},
-        {"aerosol_preset", p.aerosolPreset},
+        {"aerosol_preset", p.aerosolPresetLabel()},
+        {"aerosol_preset_modified", p.aerosolPresetModified},
         {"ozone_absorption_per_km", toJson(p.ozoneAbsorptionPerKm)},
         {"ozone_center_km", p.ozoneCenterKm},
         {"ozone_half_width_km", p.ozoneHalfWidthKm},

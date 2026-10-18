@@ -14,7 +14,7 @@ Python と比べる。
   V3b: 太陽の周り ±6°（低い太陽・夕方）の LUT 描画 vs レイマーチの光輪（記録）。
   V4b: 地表アルベド 0 の GPU の LUT 描画 vs Phase 4.7 のパストレースのダンプ（dumps/v4b、C と C+A+B）。記録のみ
        （既知の限界、§14 Phase 4.7）。ΔE_sys は validate_v4b.py と同じ（ノイズを差し引いた RMS）。
-  V9: SpectralFit709 / 2020 の C+B・C+A+B の単散乱（GPU）vs 分光リファレンス（Mie 理論の σ(λ)・p(θ, λ) を 5 nm 刻みで
+  V9: SpectralFit709 / 2020 の C+B・C+A+B・base+B・base+A+B の単散乱（GPU）vs 分光リファレンス（Mie 理論の σ(λ)・p(θ, λ) を 5 nm 刻みで
       使い、XYZ → 作業色空間）。記録のみ（今の V9 と同じ扱い）。
   MSsteps: Multi-scattering LUT の区間数・配置（20〜128、等間隔 / 2 次）ごとの誤差（GPU の検証用の LUT との比）と、
       Python の近似の描画の Ψ_ms だけを差し替えたときの ΔE_ITP（記録）。
@@ -53,11 +53,16 @@ SKY_SCENARIOS = ("day", "low_sun", "sunset", "day_10km", "altitude_3km")
 CLOSEUP_SCENARIOS = ("low_sun", "sunset")
 V4B_SCENARIOS = ("day", "low_sun", "sunset", "earth_shadow", "day_10km", "altitude_3km")
 V4B_GATED = ("day", "low_sun", "sunset", "day_10km", "altitude_3km")
+# Phase48Tests.cpp の kCombos と同じ。B を含まないもの（base+A・C・C+A）は色空間で Mie が変わらないので Hillaire2020 だけ
 ALL_COMBOS = (("Hillaire2020", "C"), ("Hillaire2020", "C+A"), ("Hillaire2020", "C+B"), ("Hillaire2020", "C+A+B"),
               ("SpectralFit709", "C+B"), ("SpectralFit709", "C+A+B"),
-              ("SpectralFit2020", "C+B"), ("SpectralFit2020", "C+A+B"))
-# 倍精度の求積（V3i・V3j）は時間がかかるので、色空間で変わる分は C+A+B だけにする
-REFERENCE_COMBOS = ALL_COMBOS[:4] + (("SpectralFit709", "C+A+B"), ("SpectralFit2020", "C+A+B"))
+              ("SpectralFit2020", "C+B"), ("SpectralFit2020", "C+A+B"),
+              ("Hillaire2020", "base+A"), ("Hillaire2020", "base+B"), ("Hillaire2020", "base+A+B"),
+              ("SpectralFit709", "base+B"), ("SpectralFit709", "base+A+B"),
+              ("SpectralFit2020", "base+B"), ("SpectralFit2020", "base+A+B"))
+# 倍精度の求積（V3i・V3j）は時間がかかるので、色空間で変わる分は C+A+B・base+A+B だけにする
+REFERENCE_COMBOS = tuple(c for c in ALL_COMBOS if c[0] == "Hillaire2020" or c[1] in ("C+A+B", "base+A+B"))
+V9_PRESETS = ("C+B", "C+A+B", "base+B", "base+A+B")
 GROUND_ALBEDO = 0.3           # アプリの既定（Multi-scattering LUT の地表）
 
 
@@ -318,10 +323,12 @@ def check_v4b(out: Path, pt_dir: Path) -> list[dict]:
 
 # ---------------------------------------------------------------------- V9
 def spectral_mie(preset: str, wl: np.ndarray):
-    """5 nm 刻みの Mie（混ぜた 1 成分）の σs(λ)・σt(λ)・位相関数の表 (U, L)（C+A+B）または None（C+B）"""
+    """5 nm 刻みの Mie（混ぜた 1 成分）の σs(λ)・σt(λ)・位相関数の表 (U, L)（A を含むとき）または None（C+B・base+B）。
+    量はプリセットの AOD550（base 系は base の量、C 系は 0.1）"""
 
     mie_wl = np.arange(360.0, 830.0 + dc.MIE_WAVELENGTH_STEP_NM / 2, dc.MIE_WAVELENGTH_STEP_NM)
     col = am.column_km(am.exponential_profile(am.BASE_MIE_SCALE_HEIGHT))
+    aod550 = am.preset_aod550(preset)
     sigma_s = np.zeros(wl.size)
     sigma_t = np.zeros(wl.size)
     weighted = np.zeros((am.PHASE_TABLE_COUNT, wl.size))
@@ -329,12 +336,12 @@ def spectral_mie(preset: str, wl: np.ndarray):
     for mode, frac in ((am.FINE, am.FINE_FRACTION_OF_AOD), (am.COARSE, 1.0 - am.FINE_FRACTION_OF_AOD)):
         spec = dc.spectral_mode(mode, mie_wl)
         i550 = int(np.argmin(np.abs(mie_wl - 550.0)))
-        ext550 = frac * am.AOD550_REALISTIC / col
+        ext550 = frac * aod550 / col
         s = ext550 * (interp @ spec.c_sca) / spec.c_ext[i550]
         sigma_s += s
         sigma_t += ext550 * (interp @ spec.c_ext) / spec.c_ext[i550]
         weighted += (interp @ spec.phase).T * s  # 位相関数も 10 nm の節点の線形補間
-    phase = weighted / sigma_s if preset == "C+A+B" else None
+    phase = weighted / sigma_s if "A" in preset.split("+") else None
     return sigma_s, sigma_t, phase
 
 
@@ -346,7 +353,7 @@ def check_v9(out: Path) -> list[dict]:
     dirs, _ = read_exr(out / "single" / "directions.exr")
     d = dirs[..., :3].reshape(-1, 3).astype(np.float64)[::4]  # 128 方向（今の V9 と同じ数）
     results = []
-    for preset in ("C+B", "C+A+B"):
+    for preset in V9_PRESETS:
         sigma_s, sigma_t, phase = spectral_mie(preset, wl)
         for sun_zenith in (30.0, 60.0, 85.0):
             ref_xyz = None

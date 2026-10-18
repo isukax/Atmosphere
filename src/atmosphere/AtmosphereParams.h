@@ -38,7 +38,8 @@ struct MieComponentPreset {
     uint32_t phaseTableSrv = kNoMiePhaseTable;  // GPU に上げた表（MiePhaseTables が設定する）
 };
 
-/// エアロゾルのプリセット（research.md §12 の変種。base / C / C+A / C+B / C+A+B / C+D / C+A+B+D）。
+/// エアロゾルのプリセット（research.md §12 の変種。base / base+A / base+B / base+A+B / C / C+A / C+B / C+A+B / C+D /
+/// C+A+B+D）。
 struct AerosolPreset {
     std::string name;
     glm::vec3 aodRgb{0.0f};  // 参考: 鉛直の光学的厚さ（RGB）
@@ -96,14 +97,19 @@ struct AtmosphereParams {
     // 係数の由来
     std::string coefficientSet = "Hillaire2020";
     std::string aerosolPreset = "base";  // [POINT] 係数セットを替えても、同じ名前のプリセットを選び直す
+    // [POINT] プリセットの値を UI で変えた（今は Cornette-Shanks の g だけ）。プリセットの名前のまま記録すると、
+    //         サイドカーと JSON のプリセットの値が食い違うので、名前に " (modified)" を付けて記録する
+    bool aerosolPresetModified = false;
     display::WorkingColorSpace workingSpace = display::WorkingColorSpace::Rec709;
 
     /// 係数セットの値（Rayleigh・Mie・オゾン・太陽の色・作業色空間）で上書きする。
-    /// セットに aerosolPreset と同じ名前のプリセットがあれば、Mie はそのプリセットの値にする。
+    /// セットに aerosolPreset と同じ名前のプリセットがあれば、Mie はそのプリセットの値にする（変更は消える）。
     void applyCoefficientSet(const CoefficientSet& set);
     /// エアロゾルのプリセットの Mie の値で上書きする（Phase 4.8 は 1 成分のプリセットだけ。2 成分は例外）。
     /// 位相関数の表のプリセットは、表を GPU に上げてあること（MiePhaseTables）。そうでなければ例外。
     void applyAerosolPreset(const AerosolPreset& preset);
+    /// 記録・表示用のプリセットの名前（変更していれば "C (modified)" のように）
+    std::string aerosolPresetLabel() const;
     /// 太陽へ向かう単位ベクトル（ワールド = 惑星座標の向き。+Y が天頂）。
     glm::vec3 sunDirection() const;
 };

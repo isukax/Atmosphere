@@ -88,7 +88,14 @@ void App::resetPathTraceIfChanged()
 void App::applyCoefficientSet(int index)
 {
     m_coefficientIndex = std::clamp(index, 0, static_cast<int>(m_coefficientSets.size()) - 1);
+    // [POINT] 係数セットを替えるとプリセットを選び直すので、UI で変えた g（Cornette-Shanks のプリセット）を戻す
+    const bool modified = m_atmosphere.aerosolPresetModified;
+    const float modifiedG = m_atmosphere.miePhaseG;
     m_atmosphere.applyCoefficientSet(m_coefficientSets[static_cast<size_t>(m_coefficientIndex)]);
+    if (modified && m_atmosphere.miePhaseTableSrv == atmosphere::kNoMiePhaseTable) {
+        m_atmosphere.miePhaseG = modifiedG;
+        m_atmosphere.aerosolPresetModified = true;
+    }
     // [POINT] 係数セットは特定の作業色空間の RGB で定義されている（§2.6）。セットを選ぶと
     //         作業色空間もそれに合わせる（Rec.709 の係数を Rec.2020 として解釈しないため）。
     m_workingSpace = m_atmosphere.workingSpace;
@@ -578,9 +585,10 @@ void App::drawAtmosphereUi()
         const glm::vec3& oz = m_atmosphere.ozoneAbsorptionPerKm;
         ImGui::Text("Rayleigh sigma_s [1e-3/km]: %.3f %.3f %.3f", rs.x * 1e3f, rs.y * 1e3f, rs.z * 1e3f);
         ImGui::Text("Ozone sigma_a [1e-3/km]   : %.3f %.3f %.3f", oz.x * 1e3f, oz.y * 1e3f, oz.z * 1e3f);
-        // エアロゾルのプリセット（design.md §5.9）。2 成分のプリセット（D）は Phase 4.9 なので選べない
+        // エアロゾルのプリセット（design.md §5.9）。2 成分のプリセット（D）は Phase 4.9 なので選べない。
+        // 変更したプリセットを選び直すと、プリセットの値に戻る
         const atmosphere::CoefficientSet& set = m_coefficientSets[static_cast<size_t>(m_coefficientIndex)];
-        if (ImGui::BeginCombo("Aerosol preset", m_atmosphere.aerosolPreset.c_str())) {
+        if (ImGui::BeginCombo("Aerosol preset", m_atmosphere.aerosolPresetLabel().c_str())) {
             for (const atmosphere::AerosolPreset& preset : set.aerosolPresets) {
                 const bool available = preset.components.size() == 1;
                 const std::string label =
@@ -601,10 +609,19 @@ void App::drawAtmosphereUi()
                     m_atmosphere.miePhaseTableSrv == atmosphere::kNoMiePhaseTable ? "Cornette-Shanks" : "Mie table");
         ImGui::Text("Sun color (Y=1): %.3f %.3f %.3f", m_atmosphere.sunColor.x, m_atmosphere.sunColor.y,
                     m_atmosphere.sunColor.z);
-        // [POINT] スライダーで編集できるのは base だけ（ほかのプリセットは Mie 理論・§12 の定義から作った固定の値）
-        ImGui::BeginDisabled(m_atmosphere.aerosolPreset != "base");
-        ImGui::SliderFloat("Mie g", &m_atmosphere.miePhaseG, 0.0f, 0.99f, "%.2f");
+        // [POINT] Mie g を動かせるのは Cornette-Shanks のプリセット（base・base+B・C・C+B）だけ。表のプリセット（A を含むもの）
+        //         では位相関数の形は表で決まり、g（平均の余弦）はパストレーサーのサンプリングにしか使わない。
+        //         動かしたら、プリセットの名前に " (modified)" を付けて記録する（サイドカーで区別できるように）
+        const bool tablePhase = m_atmosphere.miePhaseTableSrv != atmosphere::kNoMiePhaseTable;
+        ImGui::BeginDisabled(tablePhase);
+        if (ImGui::SliderFloat("Mie g", &m_atmosphere.miePhaseG, 0.0f, 0.99f, "%.2f")) {
+            m_atmosphere.aerosolPresetModified = true;
+        }
         ImGui::EndDisabled();
+        if (tablePhase) {
+            ImGui::SameLine();
+            ImGui::TextDisabled("(Mie table)");
+        }
 
         ImGui::SeparatorText("Sun");
         ImGui::SliderFloat("Zenith [deg]", &m_atmosphere.sunZenithDeg, 0.0f, 120.0f, "%.2f");

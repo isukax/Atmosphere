@@ -35,7 +35,8 @@ FINE_LAYER_TOP_KM = 1.5
 COARSE_LAYER_TOP_KM = 1.0
 LAYER_DECAY_KM = 0.3
 
-PRESET_NAMES = ("base", "C", "C+A", "C+B", "C+A+B", "C+D", "C+A+B+D")
+# base+A / base+B / base+A+B は base の量（AOD550 ≈ 0.005）で A・B だけを入れたもの（C 系と同じ作り方）
+PRESET_NAMES = ("base", "base+A", "base+B", "base+A+B", "C", "C+A", "C+B", "C+A+B", "C+D", "C+A+B+D")
 
 
 # ---------------------------------------------------------------------- 鉛直分布
@@ -213,6 +214,18 @@ def mie_mixture(modes: list[tuple[ModeOptics, float]], spectral: bool):
 
 
 # ---------------------------------------------------------------------- 変種（プリセット）
+def base_aod550() -> float:
+    """base（Hillaire 2020）の AOD = σt（海面）× 柱 ≈ 0.0053（灰色なので波長によらない）"""
+
+    return (BASE_MIE_SCATTERING + BASE_MIE_ABSORPTION) * column_km(exponential_profile(BASE_MIE_SCALE_HEIGHT))
+
+
+def preset_aod550(name: str) -> float:
+    """プリセットの AOD550（base 系は base の量、C 系は AOD550_REALISTIC）"""
+
+    return base_aod550() if name.startswith("base") else AOD550_REALISTIC
+
+
 def build_variants(rayleigh: np.ndarray, ozone: np.ndarray, fine: ModeOptics, coarse: ModeOptics) -> dict[str, Atmosphere]:
     base_profile = exponential_profile(BASE_MIE_SCALE_HEIGHT)
     base_col = column_km(base_profile)
@@ -225,7 +238,7 @@ def build_variants(rayleigh: np.ndarray, ozone: np.ndarray, fine: ModeOptics, co
         ssa = BASE_MIE_SCATTERING / (BASE_MIE_SCATTERING + BASE_MIE_ABSORPTION)
         return MieComponent("mie", ext * ssa * gray, ext * (1 - ssa) * gray, profile, phase)
 
-    base_aod = (BASE_MIE_SCATTERING + BASE_MIE_ABSORPTION) * base_col
+    base_aod = base_aod550()
     fine_ext = lambda aod, col: FINE_FRACTION_OF_AOD * aod / col  # noqa: E731
     coarse_ext = lambda aod, col: (1 - FINE_FRACTION_OF_AOD) * aod / col  # noqa: E731
 
@@ -254,12 +267,15 @@ def build_variants(rayleigh: np.ndarray, ozone: np.ndarray, fine: ModeOptics, co
         return comps
 
     base_mie = MieComponent("mie", BASE_MIE_SCATTERING * gray, BASE_MIE_ABSORPTION * gray, base_profile, cs)
-    s, a, p = mie_mixture([(fine, fine_ext(base_aod, base_col)), (coarse, coarse_ext(base_aod, base_col))], False)
-    base_a = MieComponent("mie", BASE_MIE_SCATTERING * gray, BASE_MIE_ABSORPTION * gray, base_profile, PhaseTable(p))
     aod = AOD550_REALISTIC
+    # [POINT] base+A / base+B / base+A+B は C 系と同じ作り方（AOD550 を base にそろえ、単散乱アルベドは Mie 理論の値）。
+    #         base との差には、A・B のほかに単散乱アルベドの差（0.90 → 0.94）も入る。C → C+A なども同じ
+    #         （2026-10-18 まで、research.md §12 の実験の base+A は base の σs・σa のまま位相関数だけを替えていた）
     return {
         "base": Atmosphere(rayleigh, ozone, [base_mie]),
-        "base+A": Atmosphere(rayleigh, ozone, [base_a]),
+        "base+A": Atmosphere(rayleigh, ozone, [mixed(base_aod, False, True)]),
+        "base+B": Atmosphere(rayleigh, ozone, [mixed(base_aod, True, False)]),
+        "base+A+B": Atmosphere(rayleigh, ozone, [mixed(base_aod, True, True)]),
         "C": Atmosphere(rayleigh, ozone, [gray_component(aod, base_profile, cs)]),
         "C+A": Atmosphere(rayleigh, ozone, [mixed(aod, False, True)]),
         "C+B": Atmosphere(rayleigh, ozone, [mixed(aod, True, False)]),

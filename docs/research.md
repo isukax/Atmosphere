@@ -482,6 +482,16 @@ LUT 生成 4 パスは依存関係が浅く、非同期コンピュートに載�
 
 - **Mie の計算**: Bohren & Huffman の BHMIE を式から numpy で書き直した（`reference/mie.py`）。教科書の例（m = 1.55、x = 5.213）で Q_sca = 3.10543・Q_back = 2.92534（教科書の値と 5 桁一致）、Rayleigh の極限（x = 0.01）で Q_sca・位相関数とも理論値と 10⁻⁴ 以内、大きな球（x = 2000）で Q_ext = 2.009、粒径分布で平均した位相関数の ∫p dΩ = 1.000。
 - **粒子（仮定）**: AERONET の逆解析でよく見る範囲の代表値として置いた（特定の地点・論文の値ではない）。fine-mode: 体積の中央半径 0.15 µm、σ = 0.45、屈折率 1.45 + 0.005i。coarse-mode: 2.5 µm、σ = 0.65、1.53 + 0.003i。AOD（550 nm）0.1、そのうち fine-mode 70%。
+  - AOD 0.1 の位置づけ（2026-10-18 に出典を確認して追記）: 実験のときは出典を確かめずに「晴れた日の目安」として置いた値。確認した観測値と比べると、清浄な大気と全球平均の間にあり、全球平均よりやや澄んだ側になる。
+
+    | 出典 | 条件 | AOD |
+    |---|---|---|
+    | Kinne et al. 2006（AeroCom、要旨） | 全球・年平均。AERONET / 衛星の合成 / モデル | 約 0.135 / 約 0.15 / 0.11〜0.14 |
+    | OPAC（Hess et al. 1998 の表 3・4。原典ではなく写しで確認、湿度 80%） | 清浄な大陸 / 平均的な大陸 / 都市 | 0.064 / 0.151 / 0.643 |
+    | Smirnov et al. 2002（500 nm） | 熱帯太平洋（清浄な海洋）/ 熱帯・亜熱帯大西洋（砂塵・煙が混じる） | 0.07 / 0.14 |
+
+  - Hillaire 2020 の既定（AOD ≈ 0.005）は、この表の最も清浄な値よりさらに一桁小さい。
+  - **曇天への注意**: AERONET も衛星も、雲のある時間・画素を除いて AOD を測る。上の値はすべて晴れたときの統計で、曇天の AOD には同じ種類の観測がない。雲の下にもエアロゾルはあり（遠景の霞）、雲の近くは湿度が高いので粒子が水を吸って大きくなり、AOD は増え、色は白っぽくなると考えられる（一般的な知識で、出典は未確認）。照明も太陽の直達光ではなく雲からの拡散光になる。曇天のエアロゾルの値は晴れの統計を流用せず、雲のモデル（雲底の高さ、雲からの照明）とセットで別の根拠から決める。
 - **描画**: RGB（係数セット `Hillaire2020` と同じく 680 / 550 / 440 nm を Rec.709 の RGB とみなす。太陽は白）。単散乱は視線上 96 点、太陽方向の透過率は表の補間、多重散乱は GPU と同じ Hillaire 2020 の近似（64 方向・等方・地表アルベド 0.3）をこの大気で作り直したもの。地表は太陽の直達光の反射だけ（アルベド 0.18）。太陽ディスクは描かない。
   - 確認: `Hillaire2020` の大気で、単散乱は `atmosphere_ref.py`（倍精度）と最大 0.05%、Ψ_ms は `multiple_scattering_psi` と最大 0.15% で一致。視線上の点を倍（192）にしても、見た目の差（下の ΔE_ITP）は最大 0.45 しか変わらない。
 - **比べた変種**（同じ鉛直分布の粒子は、σs で重みを付けた位相関数の混合で 1 成分にまとめた）:
@@ -514,7 +524,7 @@ LUT 生成 4 パスは依存関係が浅く、非同期コンピュートに載�
 
 | 比較 | 昼 | 低い太陽 | 夕方 | 高度 3 km |
 |---|---|---|---|---|
-| base → base+A（今の量で A だけ） | 1.9 / 0.6 | 6.2 / 2.5 | 8.0 / 1.0 | 3.6 / 1.0 |
+| base → base+A（今の量で A だけ。σs・σa は base のまま。§12.7 の定義とは少し違う） | 1.9 / 0.6 | 6.2 / 2.5 | 8.0 / 1.0 | 3.6 / 1.0 |
 | 　同じ、太陽の周り ±6° | 16 | 12 | 19 | 4.6 |
 | base → C（量だけ） | 38 / 43 | 38 / 69 | 29 / 42 | 29 / 46 |
 | C → C+A | 12 / 8.3 | 18 / 5.0 | 18 / 4.3 | 17 / 5.8 |
@@ -560,6 +570,37 @@ LUT 生成 4 パスは依存関係が浅く、非同期コンピュートに載�
 2. **A + B**: 量の次に効き、構造はすでに整っている（Mie の位相関数は LUT の外で掛けている）。位相関数は 1D の表、係数は `derive_coefficients.py` の分光フィットに Mie を加える。
 3. **D**: カメラの高度が変わる用途（飛行、高い山）で必要。Mie の成分が 2 つになり、LUT・ボリュームが 1 枚ずつ増える。地表近くだけなら後回しでよい。
 
+### 12.7 追加: 今の量（base）での A・B（2026-10-18）
+
+目的: 量を変えずに、位相関数（A）と Mie の波長依存（B）がそれぞれどれだけ見た目に効くかを見る。プリセット `base+A`・`base+B`・`base+A+B` を足し（design.md §5.9）、§12.1 と同じ方法で比べた（`aerosol_experiment.py --variants base base+A base+B base+A+B --tag _base`、`dumps/aerosol_experiment/report_base.json`）。
+
+- 作り方は C 系と同じ。AOD550 を base（σt × 柱 = 0.0053）にそろえ、単散乱アルベドは Mie 理論の値（550 nm で 0.94、base は 0.90）。§12.3 の base+A は base の σs・σa のまま位相関数だけを替えていたが、今の量では単散乱アルベドの差は見えない（下の base+A は §12.3 と ΔE で 0.3 以内、太陽の周りで 1.4 以内）。
+- base+B の AOD は R / G / B = 0.0040 / 0.0053 / 0.0073（係数セット `Hillaire2020`）。
+
+**結果（ΔE_ITP の平均、SDR、自動露出。正面 / 反対）**
+
+| 比較 | 昼 | 低い太陽 | 夕方 | 高度 3 km |
+|---|---|---|---|---|
+| base → base+A | 2.0 / 0.7 | 6.0 / 2.2 | 7.9 / 0.9 | 3.6 / 0.9 |
+| 　同じ、太陽の周り ±6° | 16 | 12 | 18 | 4.6 |
+| base → base+B | 0.8 / 0.2 | 2.6 / 0.5 | 2.9 / 1.2 | 1.6 / 0.2 |
+| 　同じ、太陽の周り ±6° | 8.1 | 8.5 | 5.4 | 2.5 |
+| base → base+A+B | 2.0 / 0.7 | 7.3 / 3.1 | 9.3 / 2.3 | 4.3 / 1.5 |
+| 　同じ、太陽の周り ±6° | 17 | 14 | 18 | 4.6 |
+
+![低い太陽（base 系）](images/aerosol_experiment_base_low_sun.png)
+![夕方（base 系）](images/aerosol_experiment_base_sunset.png)
+
+行: base / base+A / base+B / base+A+B。列は §12.3 の図と同じ（ΔE は base との差）。
+
+**分かったこと**
+1. **今の量でも A は効く**（正面で ΔE 2〜8、太陽の周りで 5〜18）。光輪が、太陽のすぐ周りの小さく明るい芯に変わる。§12.4 の 3 と同じ。
+2. **今の量では、B は画面全体ではほとんど見えない**（正面 0.8〜2.9、反対 1.2 以下）。**ただし太陽の周りの色は変わる**（±6° で ΔE 5〜8.5）。灰色の Mie では光輪が黄色みを帯びるが、B を入れると Mie の散乱が青の側で強くなり（B が R の 1.9 倍）、光輪は青白くなる。空の大部分は Rayleigh で決まるので、Mie の色が見えるのは Mie の位相関数が大きい太陽の近くだけ。
+3. **A と B は、太陽が低いときには足し算に近い**（低い太陽で A 6.0、B 2.6、A+B 7.3）。昼は A+B と A がほぼ同じ。
+4. AOD 0.1（§12.3）と比べると、画面全体での効き方は A・B とも約 1/2〜1/6。今の既定の空で A・B を確かめるなら、太陽の周りを見るのがよい。
+
+**注意**: §12.5 と同じ。加えて、今の量では多重散乱の近似は Cornette-Shanks で V4 の基準を満たしている（design.md §14 Phase 3、ΔE 0.9〜2.6）。位相関数の表（A）の場合はパストレースと比べていないが、多重散乱の割合が小さいので、AOD 0.1 ほどは外れないと考えている（未検証）。
+
 ## 参考文献・リソース
 
 - S. Hillaire, "A Scalable and Production Ready Sky and Atmosphere Rendering Technique", EGSR 2020 / CGF 39(4). https://sebh.github.io/publications/egsr2020.pdf
@@ -595,4 +636,8 @@ LUT 生成 4 パスは依存関係が浅く、非同期コンピュートに載�
 - A. H. Omar et al., "Development of global aerosol models using cluster analysis of AERONET measurements", JGR 110 (2005). https://doi.org/10.1029/2004JD004874
 - J. T. Kider et al., "A Framework for the Experimental Comparison of Solar and Skydome Illumination", ACM TOG 33(6) (2014). https://doi.org/10.1145/2661229.2661259
 - AERONET: https://aeronet.gsfc.nasa.gov/
+- S. Kinne et al., "An AeroCom initial assessment – optical properties in aerosol component modules of global models", ACP 6 (2006)（Discussions 2005）. https://authors.library.caltech.edu/7361/
+- M. Hess, P. Koepke, I. Schult, "Optical Properties of Aerosols and Clouds: The Software Package OPAC", BAMS 79 (1998). https://doi.org/10.1175/1520-0477(1998)079<0831:OPOAAC>2.0.CO;2
+- A. Smirnov et al., "Optical Properties of Atmospheric Aerosol in Maritime Environments", JAS 59 (2002). https://mdsoar.org/items/1c142726-9ccb-4f52-aa98-54553d0e85ea
+- B. N. Holben et al., "An emerging ground-based aerosol climatology: Aerosol optical depth from AERONET", JGR 106 (2001). https://mdsoar.org/items/012c0eed-53cf-4dd3-90a8-98f2d501bb64
 - C. Bohren, D. Huffman, "Absorption and Scattering of Light by Small Particles" (BHMIE), Wiley 1983
