@@ -16,6 +16,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -31,17 +32,32 @@ struct MieComponentPreset {
     std::string name;
     glm::vec3 scatteringPerKm{0.0f};  // 鉛直分布の値が 1 のところ
     glm::vec3 absorptionPerKm{0.0f};
-    float boundaryLayerTopKm = 0.0f;  // 鉛直分布 ρ(h) = exp(−max(h − h_top, 0)/H)
+    float boundaryLayerTopKm = 0.0f;  // 鉛直分布 ρ(h) = exp(−max(h − h_top, 0)/H) + a·exp(−h/H_FT)
     float scaleHeightKm = 1.2f;
+    float freeTropDensity = 0.0f;        // 自由大気の背景の a（0 ならなし）
+    float freeTropScaleHeightKm = 1.0f;  // H_FT（> 0）
     float phaseG = 0.8f;  // Cornette-Shanks の g。表のときは平均の余弦（G。パストレーサーのサンプリング用）
     std::vector<glm::vec4> phaseTable;          // 位相関数の表 [sr⁻¹]（RGB + 0）。空なら Cornette-Shanks
     uint32_t phaseTableSrv = kNoMiePhaseTable;  // GPU に上げた表（MiePhaseTables が設定する）
+};
+
+/// 2 つ目の Mie の成分（2 成分のプリセット。design.md §5.9）。意味は AtmosphereParams の成分 0 の同名の値と同じ。
+struct MieComponentParams {
+    glm::vec3 scatteringPerKm{0.0f};
+    glm::vec3 absorptionPerKm{0.0f};
+    float scaleHeightKm = 1.2f;
+    float boundaryLayerTopKm = 0.0f;
+    float freeTropDensity = 0.0f;
+    float freeTropScaleHeightKm = 1.0f;
+    float phaseG = 0.8f;
+    uint32_t phaseTableSrv = kNoMiePhaseTable;
 };
 
 /// エアロゾルのプリセット（research.md §12 の変種。base / base+A / base+B / base+A+B / C / C+A / C+B / C+A+B / C+D /
 /// C+A+B+D）。
 struct AerosolPreset {
     std::string name;
+    float aod550 = 0.0f;     // 550 nm の鉛直の光学的厚さ（AOD を変えるときの基準、design.md §5.10）
     glm::vec3 aodRgb{0.0f};  // 参考: 鉛直の光学的厚さ（RGB）
     std::vector<MieComponentPreset> components;
 };
@@ -76,8 +92,14 @@ struct AtmosphereParams {
     glm::vec3 mieAbsorptionPerKm{0.444e-3f};
     float mieScaleHeightKm = 1.2f;
     float mieBoundaryLayerTopKm = 0.0f;            // 0 なら指数分布（design.md §5.9）
+    float mieFreeTropDensity = 0.0f;               // 自由大気の背景の項 a·exp(−h/H_FT) の a（0 ならなし）
+    float mieFreeTropScaleHeightKm = 1.0f;         // H_FT（> 0）
     float miePhaseG = 0.8f;                        // Cornette-Shanks の g（表のときは平均の余弦）
     uint32_t miePhaseTableSrv = kNoMiePhaseTable;  // 位相関数の表（GPU）。無効値なら Cornette-Shanks
+    // [POINT] 上の mie* は Mie の成分 0。2 成分のプリセット（鉛直分布が違う fine / coarse、design.md §5.9）では
+    //         成分 1 を mie1 に持つ
+    uint32_t mieComponentCount = 1;
+    MieComponentParams mie1;
     glm::vec3 ozoneAbsorptionPerKm{0.650e-3f, 1.881e-3f, 0.085e-3f};
     float ozoneCenterKm = 25.0f;
     float ozoneHalfWidthKm = 15.0f;
@@ -97,17 +119,29 @@ struct AtmosphereParams {
     // 係数の由来
     std::string coefficientSet = "Hillaire2020";
     std::string aerosolPreset = "base";  // [POINT] 係数セットを替えても、同じ名前のプリセットを選び直す
-    // [POINT] プリセットの値を UI で変えた（今は Cornette-Shanks の g だけ）。プリセットの名前のまま記録すると、
-    //         サイドカーと JSON のプリセットの値が食い違うので、名前に " (modified)" を付けて記録する
-    bool aerosolPresetModified = false;
+    float aerosolPresetAod550 = 0.0f;    // 今のプリセットの AOD550（applyAerosolPreset が設定する）
+    // [POINT] UI で決めた AOD550（design.md §5.10）。設定されていれば、プリセットや係数セットを替えても保ち、
+    //         Mie の σs・σa（全成分・RGB）に AOD / プリセットの AOD を掛ける。未設定ならプリセットの量のまま
+    std::optional<float> aerosolAod550Override;
+    // [POINT] UI で Cornette-Shanks の g を変えた。g や AOD をプリセットの名前のまま記録すると、サイドカーと JSON の
+    //         プリセットの値が食い違うので、名前に " (modified)" を付けて記録する（aerosolPresetModified()）
+    bool miePhaseGModified = false;
     display::WorkingColorSpace workingSpace = display::WorkingColorSpace::Rec709;
 
     /// 係数セットの値（Rayleigh・Mie・オゾン・太陽の色・作業色空間）で上書きする。
     /// セットに aerosolPreset と同じ名前のプリセットがあれば、Mie はそのプリセットの値にする（変更は消える）。
     void applyCoefficientSet(const CoefficientSet& set);
-    /// エアロゾルのプリセットの Mie の値で上書きする（Phase 4.8 は 1 成分のプリセットだけ。2 成分は例外）。
+    /// エアロゾルのプリセットの Mie の値で上書きする（1 成分か 2 成分。3 成分以上は例外）。
     /// 位相関数の表のプリセットは、表を GPU に上げてあること（MiePhaseTables）。そうでなければ例外。
+    /// g の変更は消える。AOD の上書き（aerosolAod550Override）は保ち、新しいプリセットの係数に掛ける。
     void applyAerosolPreset(const AerosolPreset& preset);
+    /// AOD550 を設定する（nullopt ならプリセットの量に戻す）。preset は今のプリセット（名前が違えば例外）。
+    /// σs・σa は毎回プリセットの値から計算し直す（掛け算を重ねない）。g・鉛直分布・位相関数は変えない。
+    void setAerosolAod550(const AerosolPreset& preset, std::optional<float> aod550);
+    /// 今の AOD550（上書きがあればその値、なければプリセットの値）
+    float aerosolAod550() const { return aerosolAod550Override.value_or(aerosolPresetAod550); }
+    /// プリセットの値から変えたか（g か AOD）
+    bool aerosolPresetModified() const { return miePhaseGModified || aerosolAod550Override.has_value(); }
     /// 記録・表示用のプリセットの名前（変更していれば "C (modified)" のように）
     std::string aerosolPresetLabel() const;
     /// 太陽へ向かう単位ベクトル（ワールド = 惑星座標の向き。+Y が天頂）。
@@ -133,21 +167,29 @@ struct AtmosphereGpu {
     float mieBoundaryLayerTopKm;
     uint32_t miePhaseTableSrv;
     uint32_t mieComponentCount;
-    float mie1BoundaryLayerTopKm;  // 以下、2 つ目の Mie の成分（Phase 4.9 で使う。今は 0）
+    float mie1BoundaryLayerTopKm;  // 以下、2 つ目の Mie の成分（1 成分なら係数 0）
     float mie1ScaleHeightKm;
     float mie1ScatteringPerKm[3];
     float mie1PhaseG;
     float mie1ExtinctionPerKm[3];
     uint32_t mie1PhaseTableSrv;
+    float mieFreeTropDensity;  // 自由大気の背景の項（design.md §5.9）
+    float mieFreeTropScaleHeightKm;
+    float mie1FreeTropDensity;
+    float mie1FreeTropScaleHeightKm;
 
     bool operator==(const AtmosphereGpu&) const = default;
 };
-static_assert(sizeof(AtmosphereGpu) == 9 * 16);
+static_assert(sizeof(AtmosphereGpu) == 10 * 16);
 
 /// 既定のパラメータ: 係数セット "Hillaire2020" を適用し、太陽照度を JSON のスペクトル由来の値にする。
 AtmosphereParams loadDefaultParams(const std::filesystem::path& coefficientPath);
 
 AtmosphereGpu toGpu(const AtmosphereParams& params);
+
+/// Mie の一般形（2 成分か自由大気の背景）を扱うシェーダーの版（MIE_GENERAL = 1）が要るか（design.md §5.9）。
+/// false なら 1 成分・背景なしの版（Phase 4.8 と同じコード）で同じ結果になる。
+bool usesGeneralMieMedium(const AtmosphereParams& params);
 
 /// 惑星座標 [km] でのカメラ位置: ワールド座標 [m] × 0.001 + (0, R_bottom + 原点高度, 0)。
 glm::vec3 worldToPlanetKm(const AtmosphereParams& params, const glm::vec3& worldPosM);

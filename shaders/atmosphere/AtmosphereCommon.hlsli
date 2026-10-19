@@ -9,6 +9,14 @@
 
 #include "common/Math.hlsli"
 
+// [POINT] Mie の一般形（2 成分・自由大気の背景、design.md §5.9）を扱うシェーダーの版。CMake が 0 / 1 の 2 通りに
+//         コンパイルし、C++ がプリセットに合わせて選ぶ（AtmosphereRenderer、usesGeneralMieMedium）。0 の版は
+//         1 成分・背景なしの媒質だけを扱い、Phase 4.8 と同じコードになる（成分 1 の分岐や変数を残すと、1 成分でも
+//         ループの命令とレジスタが増え、GPU 時間が 10〜30% 増えた）
+#ifndef MIE_GENERAL
+#define MIE_GENERAL 0
+#endif
+
 // [POINT] C++ の atmosphere::AtmosphereGpu（src/atmosphere/AtmosphereParams.h）と同じ並び。
 //         float3 + float の組で 16 バイトの行をちょうど埋めるので、HLSL と C++ の
 //         パッキングが一致する（static_assert で照合している）。
@@ -32,13 +40,18 @@ struct AtmosphereParameters
     //         Cornette-Shanks（miePhaseG）。表のときの miePhaseG は平均の余弦で、パストレーサーの方向の
     //         サンプリング（Henyey-Greenstein）だけに使う。
     uint   miePhaseTableSrv;
-    uint   mieComponentCount;        // Mie の成分の数（Phase 4.8 では 1。2 つ目の成分は Phase 4.9）
-    float  mie1BoundaryLayerTopKm;   // 以下、2 つ目の成分（Phase 4.9 で使う。今は未使用）
+    uint   mieComponentCount;        // Mie の成分の数（1 か 2。2 なら以下の mie1* が 2 つ目の成分、design.md §5.9）
+    float  mie1BoundaryLayerTopKm;
     float  mie1ScaleHeightKm;
     float3 mie1ScatteringPerKm;
     float  mie1PhaseG;
     float3 mie1ExtinctionPerKm;
     uint   mie1PhaseTableSrv;
+    // 鉛直分布の自由大気の背景の項 a·exp(−h/H_FT)（design.md §5.9「自由大気の背景の項」）。a = 0 ならなし
+    float  mieFreeTropDensity;
+    float  mieFreeTropScaleHeightKm;
+    float  mie1FreeTropDensity;
+    float  mie1FreeTropScaleHeightKm;
 };
 
 // ---------------------------------------------------------------------------
@@ -48,28 +61,49 @@ struct AtmosphereParameters
 struct MediumSample
 {
     float3 rayleighScattering;  // σs_R(h) [km⁻¹]
-    float3 mieScattering;       // σs_M(h) [km⁻¹]
-    float3 extinction;          // σt(h) = σs_R + σt_M + σa_O3 [km⁻¹]
+    float3 mieScattering;       // σs_M(h) [km⁻¹]（Mie の成分 0）
+    float3 mie1Scattering;      // Mie の成分 1（1 成分なら 0）
+    float3 extinction;          // σt(h) = σs_R + Σ σt_M + σa_O3 [km⁻¹]
 };
+
+// Mie の鉛直分布: 境界層 exp(−max(h − h_top, 0)/H)（h_top = 0 なら指数分布）+ 自由大気の背景 a·exp(−h/H_FT)
+// （design.md §5.9）。値の上限（h = 0）は 1 + a。
+float MieDensity(float altitudeKm, float topKm, float scaleHeightKm, float freeTropDensity, float freeTropScaleHeightKm)
+{
+    return exp(-max(altitudeKm - topKm, 0.0) / scaleHeightKm) + freeTropDensity * exp(-altitudeKm / freeTropScaleHeightKm);
+}
 
 // 高度 altitudeKm [km] での媒質の係数。
 MediumSample SampleMedium(AtmosphereParameters a, float altitudeKm)
 {
     // [POINT] 高度は 0 以上にクランプする。惑星座標の float32 は地表付近（6360 km）で精度が ~0.5 m しかなく、
-    //         地表すれすれの点がわずかに負の高度になる。負の高度で密度が 1 を超えると、パストレーサーの
-    //         デルタトラッキングの前提（σt ≤ σ̄）が崩れ、惑星内部の点では exp が溢れて NaN になる。
+    //         地表すれすれの点がわずかに負の高度になる。負の高度で密度が上限（Mie は 1 + a）を超えると、
+    //         パストレーサーのデルタトラッキングの前提（σt ≤ σ̄）が崩れ、惑星内部の点では exp が溢れて NaN になる。
     altitudeKm = max(altitudeKm, 0.0);
     // [POINT] 密度分布: Rayleigh は指数（スケールハイト H で 1/e）、オゾンは 25 km を中心とした幅 30 km の
-    //         テント関数（吸収のみ、散乱しない）。Mie は境界層の解析式 exp(−max(h − h_top, 0)/H)
-    //         （design.md §5.9）。h_top = 0 なら指数分布と同じ式。
+    //         テント関数（吸収のみ、散乱しない）。Mie は成分ごとに MieDensity（境界層 + 自由大気の背景）。
     const float rayleighDensity = exp(-altitudeKm / a.rayleighScaleHeightKm);
+#if MIE_GENERAL
+    const float mieDensity = MieDensity(altitudeKm, a.mieBoundaryLayerTopKm, a.mieScaleHeightKm, a.mieFreeTropDensity,
+                                        a.mieFreeTropScaleHeightKm);
+#else
     const float mieDensity = exp(-max(altitudeKm - a.mieBoundaryLayerTopKm, 0.0) / a.mieScaleHeightKm);
+#endif
     const float ozoneDensity = max(0.0, 1.0 - abs(altitudeKm - a.ozoneCenterKm) / a.ozoneHalfWidthKm);
 
     MediumSample m;
     m.rayleighScattering = a.rayleighScatteringPerKm * rayleighDensity;
     m.mieScattering = a.mieScatteringPerKm * mieDensity;
+    m.mie1Scattering = 0.0;
     m.extinction = m.rayleighScattering + a.mieExtinctionPerKm * mieDensity + a.ozoneAbsorptionPerKm * ozoneDensity;
+#if MIE_GENERAL
+    if (a.mieComponentCount > 1) {
+        const float mie1Density = MieDensity(altitudeKm, a.mie1BoundaryLayerTopKm, a.mie1ScaleHeightKm,
+                                             a.mie1FreeTropDensity, a.mie1FreeTropScaleHeightKm);
+        m.mie1Scattering = a.mie1ScatteringPerKm * mie1Density;
+        m.extinction += a.mie1ExtinctionPerKm * mie1Density;
+    }
+#endif
     return m;
 }
 

@@ -88,13 +88,15 @@ void App::resetPathTraceIfChanged()
 void App::applyCoefficientSet(int index)
 {
     m_coefficientIndex = std::clamp(index, 0, static_cast<int>(m_coefficientSets.size()) - 1);
-    // [POINT] 係数セットを替えるとプリセットを選び直すので、UI で変えた g（Cornette-Shanks のプリセット）を戻す
-    const bool modified = m_atmosphere.aerosolPresetModified;
+    // [POINT] 係数セットを替えるとプリセットを選び直すので、UI で変えた g（Cornette-Shanks のプリセット）を戻す。
+    //         UI で決めた AOD（aerosolAod550Override）は applyAerosolPreset が保つので、ここでは何もしない
+    const bool modified = m_atmosphere.miePhaseGModified;
     const float modifiedG = m_atmosphere.miePhaseG;
     m_atmosphere.applyCoefficientSet(m_coefficientSets[static_cast<size_t>(m_coefficientIndex)]);
-    if (modified && m_atmosphere.miePhaseTableSrv == atmosphere::kNoMiePhaseTable) {
+    if (modified && m_atmosphere.miePhaseTableSrv == atmosphere::kNoMiePhaseTable &&
+        m_atmosphere.mieComponentCount == 1) {
         m_atmosphere.miePhaseG = modifiedG;
-        m_atmosphere.aerosolPresetModified = true;
+        m_atmosphere.miePhaseGModified = true;
     }
     // [POINT] 係数セットは特定の作業色空間の RGB で定義されている（§2.6）。セットを選ぶと
     //         作業色空間もそれに合わせる（Rec.709 の係数を Rec.2020 として解釈しないため）。
@@ -107,12 +109,22 @@ void App::applyAerosolPreset(const std::string& name)
 {
     const atmosphere::CoefficientSet& set = m_coefficientSets[static_cast<size_t>(m_coefficientIndex)];
     const atmosphere::AerosolPreset* preset = set.findAerosolPreset(name);
-    if (preset == nullptr || preset->components.size() != 1) {
-        return;  // 2 成分のプリセットは Phase 4.9
+    if (preset == nullptr) {
+        return;
     }
     m_atmosphere.applyAerosolPreset(*preset);
-    logEvent(std::format("Aerosol preset: {} (AOD {:.4f} {:.4f} {:.4f})", preset->name, preset->aodRgb.x,
-                         preset->aodRgb.y, preset->aodRgb.z));
+    logEvent(std::format("Aerosol preset: {} (AOD550 {:.4f}{})", preset->name, m_atmosphere.aerosolAod550(),
+                         m_atmosphere.aerosolAod550Override ? ", kept from UI" : ""));
+}
+
+void App::setAerosolAod550(std::optional<float> aod550)
+{
+    const atmosphere::CoefficientSet& set = m_coefficientSets[static_cast<size_t>(m_coefficientIndex)];
+    const atmosphere::AerosolPreset* preset = set.findAerosolPreset(m_atmosphere.aerosolPreset);
+    if (preset == nullptr) {
+        return;
+    }
+    m_atmosphere.setAerosolAod550(*preset, aod550);
 }
 
 void App::updateCamera()
@@ -585,42 +597,78 @@ void App::drawAtmosphereUi()
         const glm::vec3& oz = m_atmosphere.ozoneAbsorptionPerKm;
         ImGui::Text("Rayleigh sigma_s [1e-3/km]: %.3f %.3f %.3f", rs.x * 1e3f, rs.y * 1e3f, rs.z * 1e3f);
         ImGui::Text("Ozone sigma_a [1e-3/km]   : %.3f %.3f %.3f", oz.x * 1e3f, oz.y * 1e3f, oz.z * 1e3f);
-        // エアロゾルのプリセット（design.md §5.9）。2 成分のプリセット（D）は Phase 4.9 なので選べない。
-        // 変更したプリセットを選び直すと、プリセットの値に戻る
+        // エアロゾルのプリセット（design.md §5.9）。D を含むプリセットは Mie が 2 成分（fine / coarse）。
+        // 変更したプリセットを選び直すと g はプリセットの値に戻る。AOD は UI で決めた値を保つ（Reset AOD で戻す）
         const atmosphere::CoefficientSet& set = m_coefficientSets[static_cast<size_t>(m_coefficientIndex)];
         if (ImGui::BeginCombo("Aerosol preset", m_atmosphere.aerosolPresetLabel().c_str())) {
             for (const atmosphere::AerosolPreset& preset : set.aerosolPresets) {
-                const bool available = preset.components.size() == 1;
                 const std::string label =
-                    available ? preset.name : preset.name + " (2 components: Phase 4.9)";
-                if (ImGui::Selectable(label.c_str(), preset.name == m_atmosphere.aerosolPreset,
-                                      available ? 0 : ImGuiSelectableFlags_Disabled)) {
+                    preset.components.size() > 1 ? preset.name + " (2 components)" : preset.name;
+                if (ImGui::Selectable(label.c_str(), preset.name == m_atmosphere.aerosolPreset)) {
                     applyAerosolPreset(preset.name);
                 }
             }
             ImGui::EndCombo();
         }
-        const glm::vec3& ms = m_atmosphere.mieScatteringPerKm;
-        const glm::vec3& ma = m_atmosphere.mieAbsorptionPerKm;
-        ImGui::Text("Mie sigma_s [1e-3/km]     : %.3f %.3f %.3f", ms.x * 1e3f, ms.y * 1e3f, ms.z * 1e3f);
-        ImGui::Text("Mie sigma_a [1e-3/km]     : %.3f %.3f %.3f", ma.x * 1e3f, ma.y * 1e3f, ma.z * 1e3f);
-        ImGui::Text("Mie profile: top %.2f km, H %.2f km, phase %s", m_atmosphere.mieBoundaryLayerTopKm,
-                    m_atmosphere.mieScaleHeightKm,
-                    m_atmosphere.miePhaseTableSrv == atmosphere::kNoMiePhaseTable ? "Cornette-Shanks" : "Mie table");
+        // [POINT] AOD（550 nm）は量の軸、プリセットは粒子の種類（design.md §5.10）。σs・σa に AOD / プリセットの AOD を
+        //         掛けるだけなので、LUT は媒質の変更として作り直される（Transmittance・Multi-scattering）
+        if (const atmosphere::AerosolPreset* preset = set.findAerosolPreset(m_atmosphere.aerosolPreset)) {
+            float aod = m_atmosphere.aerosolAod550();
+            if (ImGui::SliderFloat("AOD 550", &aod, 0.001f, 1.0f, "%.4f", ImGuiSliderFlags_Logarithmic)) {
+                setAerosolAod550(std::max(aod, 0.001f));
+            }
+            if (ImGui::IsItemDeactivatedAfterEdit()) {
+                logEvent(std::format("Aerosol AOD550: {:.4f} (preset {} {:.4f})", m_atmosphere.aerosolAod550(),
+                                     preset->name, preset->aod550));
+            }
+            ImGui::SameLine();
+            ImGui::BeginDisabled(!m_atmosphere.aerosolAod550Override);
+            if (ImGui::Button("Reset AOD")) {
+                setAerosolAod550(std::nullopt);
+                logEvent(std::format("Aerosol AOD550: reset to preset {} ({:.4f})", preset->name, preset->aod550));
+            }
+            ImGui::EndDisabled();
+            const glm::vec3 aodRgb = preset->aodRgb * (m_atmosphere.aerosolAod550() / preset->aod550);
+            ImGui::Text("AOD RGB: %.4f %.4f %.4f (preset AOD550 %.4f)", aodRgb.x, aodRgb.y, aodRgb.z, preset->aod550);
+            // 検証は AOD 0.1 まで（それより濃いと品質の設定も多重散乱の近似も測っていない、design.md §5.10）
+            if (m_atmosphere.aerosolAod550() > 0.1f + 1e-6f) {
+                ImGui::SameLine();
+                ImGui::TextDisabled("(> 0.1: not validated)");
+            }
+        }
+        const auto mieText =[](const char* label, const glm::vec3& s, const glm::vec3& a, float topKm,
+                                float scaleHeightKm, float freeTropDensity, float freeTropScaleHeightKm,
+                                uint32_t tableSrv) {
+            ImGui::Text("%s sigma_s [1e-3/km]: %.3f %.3f %.3f", label, s.x * 1e3f, s.y * 1e3f, s.z * 1e3f);
+            ImGui::Text("%s sigma_a [1e-3/km]: %.3f %.3f %.3f", label, a.x * 1e3f, a.y * 1e3f, a.z * 1e3f);
+            ImGui::Text("%s profile: top %.2f km, H %.2f km, FT a %.3f H %.1f km, phase %s", label, topKm,
+                        scaleHeightKm, freeTropDensity, freeTropScaleHeightKm,
+                        tableSrv == atmosphere::kNoMiePhaseTable ? "Cornette-Shanks" : "Mie table");
+        };
+        mieText(m_atmosphere.mieComponentCount > 1 ? "Mie0" : "Mie ", m_atmosphere.mieScatteringPerKm,
+                m_atmosphere.mieAbsorptionPerKm, m_atmosphere.mieBoundaryLayerTopKm, m_atmosphere.mieScaleHeightKm,
+                m_atmosphere.mieFreeTropDensity, m_atmosphere.mieFreeTropScaleHeightKm, m_atmosphere.miePhaseTableSrv);
+        if (m_atmosphere.mieComponentCount > 1) {
+            const atmosphere::MieComponentParams& m1 = m_atmosphere.mie1;
+            mieText("Mie1", m1.scatteringPerKm, m1.absorptionPerKm, m1.boundaryLayerTopKm, m1.scaleHeightKm,
+                    m1.freeTropDensity, m1.freeTropScaleHeightKm, m1.phaseTableSrv);
+        }
         ImGui::Text("Sun color (Y=1): %.3f %.3f %.3f", m_atmosphere.sunColor.x, m_atmosphere.sunColor.y,
                     m_atmosphere.sunColor.z);
-        // [POINT] Mie g を動かせるのは Cornette-Shanks のプリセット（base・base+B・C・C+B）だけ。表のプリセット（A を含むもの）
-        //         では位相関数の形は表で決まり、g（平均の余弦）はパストレーサーのサンプリングにしか使わない。
+        // [POINT] Mie g を動かせるのは 1 成分の Cornette-Shanks のプリセット（base・base+B・C・C+B）だけ。表のプリセット
+        //         （A を含むもの）では位相関数の形は表で決まり、g（平均の余弦）はパストレーサーのサンプリングにしか使わない。
+        //         2 成分のプリセット（D）は、どちらの成分の g かが曖昧になるので動かせない（design.md §5.9）。
         //         動かしたら、プリセットの名前に " (modified)" を付けて記録する（サイドカーで区別できるように）
         const bool tablePhase = m_atmosphere.miePhaseTableSrv != atmosphere::kNoMiePhaseTable;
-        ImGui::BeginDisabled(tablePhase);
+        const bool twoComponents = m_atmosphere.mieComponentCount > 1;
+        ImGui::BeginDisabled(tablePhase || twoComponents);
         if (ImGui::SliderFloat("Mie g", &m_atmosphere.miePhaseG, 0.0f, 0.99f, "%.2f")) {
-            m_atmosphere.aerosolPresetModified = true;
+            m_atmosphere.miePhaseGModified = true;
         }
         ImGui::EndDisabled();
-        if (tablePhase) {
+        if (tablePhase || twoComponents) {
             ImGui::SameLine();
-            ImGui::TextDisabled("(Mie table)");
+            ImGui::TextDisabled(twoComponents ? "(2 components)" : "(Mie table)");
         }
 
         ImGui::SeparatorText("Sun");
@@ -741,6 +789,12 @@ void App::drawTextureViewUi(const ImVec2& pos)
         const gfx::Texture& svMie = m_atmosphereRenderer->skyViewMieLut();
         ImGui::Image(static_cast<ImTextureID>(m_device.bindless().gpu(svMie.srvIndex()).ptr), ImVec2(192.0f, 108.0f));
         ImGui::TextDisabled("Sky-View Mie LUT (single scattering without phase, x p_M per pixel)");
+        if (m_atmosphere.mieComponentCount > 1) {
+            const gfx::Texture& svMie1 = m_atmosphereRenderer->skyViewMie1Lut();
+            ImGui::Image(static_cast<ImTextureID>(m_device.bindless().gpu(svMie1.srvIndex()).ptr),
+                         ImVec2(192.0f, 108.0f));
+            ImGui::TextDisabled("Sky-View Mie LUT, component 1 (coarse)");
+        }
 
         ImGui::SeparatorText("Sun shadow maps");
         // シャドウマップ（深度、R に表示。明るいほど太陽に近い）

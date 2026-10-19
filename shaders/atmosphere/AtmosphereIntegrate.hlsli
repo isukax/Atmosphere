@@ -17,15 +17,17 @@
 // Mie の位相関数の表の点の数（θ = π·u²、u は 0〜1 の等間隔。reference/aerosol_models.py の PHASE_TABLE_COUNT）
 static const uint kMiePhaseTableCount = 2049;
 
-// Mie の位相関数 [sr⁻¹]（RGB）。表があれば表（design.md §5.9、エアロゾルのプリセット）、なければ Cornette-Shanks。
+// Mie の成分 component（0 / 1）の位相関数 [sr⁻¹]（RGB）。表があれば表（design.md §5.9、エアロゾルのプリセット）、
+// なければ Cornette-Shanks。
 // [POINT] 表は θ = π·u² で刻む（前方のピークを細かく）。u = √(θ/π) で線形補間する（パストレーサーの表の媒質・
 //         Python の PhaseTable と同じ補間）。
-float3 MiePhase(AtmosphereParameters a, float cosTheta)
+float3 MiePhase(AtmosphereParameters a, uint component, float cosTheta)
 {
-    if (a.miePhaseTableSrv == kInvalidDescriptorIndex) {
-        return CornetteShanksPhase(a.miePhaseG, cosTheta).xxx;
+    const uint tableSrv = component == 0 ? a.miePhaseTableSrv : a.mie1PhaseTableSrv;
+    if (tableSrv == kInvalidDescriptorIndex) {
+        return CornetteShanksPhase(component == 0 ? a.miePhaseG : a.mie1PhaseG, cosTheta).xxx;
     }
-    StructuredBuffer<float4> table = ResourceDescriptorHeap[a.miePhaseTableSrv];
+    StructuredBuffer<float4> table = ResourceDescriptorHeap[tableSrv];
     const float u = sqrt(acos(clamp(cosTheta, -1.0, 1.0)) / kPi);
     const float f = u * float(kMiePhaseTableCount - 1);
     const uint i = min(uint(f), kMiePhaseTableCount - 2);
@@ -103,7 +105,7 @@ struct IntegrationSettings
     bool isotropicPhase;        // 位相関数を 1/(4π) にする（Multi-scattering LUT の生成用）
     bool groundRadiance;        // 地表に当たったら地表のランバート反射を加える（Multi-scattering LUT の生成用）
     bool uniformSteps;          // true: 区間を等間隔に置く（比較用）/ false: 2 次配置（既定。全パス）
-    bool separateMiePhase;      // true: Mie の単散乱を luminance に入れず、位相関数なしで mieSingleNoPhase に分ける（Sky-View LUT・空気遠近法用）
+    bool separateMiePhase;      // true: Mie の単散乱を luminance に入れず、位相関数なしで成分ごとに mie*SingleNoPhase に分ける（Sky-View LUT・空気遠近法用）
     float maxDistanceKm;        // 積分する距離の上限 [km]（地形・空気遠近法のボクセルまで）。上限なしは kNoDistanceLimitKm
     // 不透明物（地形）の太陽の影（design.md §5.5）。farSrv が無効値なら影なし。光線の原点がカメラのときだけ使える
     OpaqueShadowParameters opaqueShadow;
@@ -127,6 +129,9 @@ struct ScatteringResult
 {
     float3 luminance;         // 単位照度あたりの輝度 [sr⁻¹]（separateMiePhase なら Mie の単散乱を除く）
     float3 mieSingleNoPhase;  // ∫ T_view·σs_M·T_sun dt [無次元]。× p_M(θ) [sr⁻¹] で Mie の単散乱の輝度（単位照度あたり）
+    // Mie の成分 1 の同じ量（1 成分なら 0）。成分ごとに鉛直分布が違うと視線上で位相関数の混ざり方が変わるので、
+    // 位相関数を除いた積分は成分ごとに持つ（design.md §5.9）
+    float3 mie1SingleNoPhase;
     float3 multiScatAs1;      // f_ms の被積分量: ∫ T_view·σs dt（等方な単位入射光が散乱して戻る割合）
     float3 multipleScattering;  // luminance のうち多重散乱の分 [sr⁻¹]（影の対象外。空気遠近法で単散乱と分けて持つ）
     float3 transmittance;     // カメラ → 積分区間の終端の透過率
@@ -176,6 +181,7 @@ ScatteringResult IntegrateScatteredLuminance(AtmosphereParameters a, AtmosphereL
     ScatteringResult result;
     result.luminance = 0.0;
     result.mieSingleNoPhase = 0.0;
+    result.mie1SingleNoPhase = 0.0;
     result.multiScatAs1 = 0.0;
     result.multipleScattering = 0.0;
     result.transmittance = 1.0;
@@ -204,7 +210,14 @@ ScatteringResult IntegrateScatteredLuminance(AtmosphereParameters a, AtmosphereL
 
     const float cosTheta = dot(dir, sunDir);
     const float phaseRayleigh = s.isotropicPhase ? kIsotropicPhase : RayleighPhase(cosTheta);
-    const float3 phaseMie = s.isotropicPhase ? kIsotropicPhase.xxx : MiePhase(a, cosTheta);
+    const float3 phaseMie = s.isotropicPhase ? kIsotropicPhase.xxx : MiePhase(a, 0, cosTheta);
+#if MIE_GENERAL
+    // [POINT] HLSL の三項演算子は両辺を評価するので、成分 1 の位相関数は if で求める
+    float3 phaseMie1 = kIsotropicPhase.xxx;
+    if (!s.isotropicPhase && a.mieComponentCount > 1) {
+        phaseMie1 = MiePhase(a, 1, cosTheta);
+    }
+#endif
 
     // [POINT] 光線上のサンプル配置（区間端）。LUT のマッピング（テクセル ↔ 方向）とは別の話。
     //   2 次配置 t_k = (k/N)²（Sky-View LUT・レイマーチ）: カメラの近くを細かくする。地表付近の Mie は
@@ -228,7 +241,11 @@ ScatteringResult IntegrateScatteredLuminance(AtmosphereParameters a, AtmosphereL
         const float t = 0.5 * (t0 + t1);
         const float3 p = origin + t * dir;
         const MediumSample m = SampleMedium(a, length(p) - a.bottomRadiusKm);
+#if MIE_GENERAL
+        const float3 scattering = m.rayleighScattering + m.mieScattering + m.mie1Scattering;
+#else
         const float3 scattering = m.rayleighScattering + m.mieScattering;
+#endif
         const float3 segmentTransmittance = exp(-m.extinction * dt);
 
         // 区間内の光源項 S [km⁻¹·sr⁻¹]: 単散乱（太陽の直達光）+ 多重散乱（式 (11)）
@@ -245,9 +262,15 @@ ScatteringResult IntegrateScatteredLuminance(AtmosphereParameters a, AtmosphereL
         }
         visibilitySum += visibility;
         const float3 mieNoPhase = m.mieScattering * sunTransmittance;  // [km⁻¹]
+#if MIE_GENERAL
+        const float3 mie1NoPhase = m.mie1Scattering * sunTransmittance;
+#endif
         float3 source = m.rayleighScattering * phaseRayleigh * sunTransmittance;
         if (!s.separateMiePhase) {
             source += mieNoPhase * phaseMie;
+#if MIE_GENERAL
+            source += mie1NoPhase * phaseMie1;
+#endif
         }
         float3 multipleSource = 0.0;
         if (s.multipleScattering) {
@@ -261,6 +284,9 @@ ScatteringResult IntegrateScatteredLuminance(AtmosphereParameters a, AtmosphereL
         const float3 segmentWeight = dt * OneMinusExpOverX(m.extinction * dt);
         result.luminance += throughput * source * segmentWeight;
         result.mieSingleNoPhase += throughput * mieNoPhase * segmentWeight;
+#if MIE_GENERAL
+        result.mie1SingleNoPhase += throughput * mie1NoPhase * segmentWeight;
+#endif
         result.multiScatAs1 += throughput * scattering * segmentWeight;
         result.multipleScattering += throughput * multipleSource * segmentWeight;
         throughput *= segmentTransmittance;

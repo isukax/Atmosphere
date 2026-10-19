@@ -1,5 +1,7 @@
 #include "batch/Phase48Tests.h"
 
+#include "batch/Phase45Tests.h"
+#include "batch/Phase4Tests.h"
 #include "atmosphere/AtmosphereRenderer.h"
 #include "atmosphere/MiePhaseTables.h"
 #include "io/ExrWriter.h"
@@ -25,11 +27,13 @@ std::vector<float> toFloats(const std::vector<uint8_t>& bytes)
     return out;
 }
 
-/// 検証する係数セットとプリセット（1 成分）。B を含まないもの（base+A・C・C+A）は色空間で Mie が変わらないので
-/// Hillaire2020 だけ
+/// 検証する係数セットとプリセット。B を含まないもの（base+A・C・C+A・C+D）は色空間で Mie が変わらないので
+/// Hillaire2020 だけ。C+D・C+A+B+D は Mie が 2 成分（Phase 4.9。1 成分の組み合わせの後に並べ、出力のファイルは足すだけ）。
+/// aod550 > 0 の組は UI の AOD の上書き（design.md §5.10）。V3i・V3j だけを書く（ファイル名の末尾に _aod<値>）
 struct Combo {
     const char* set;
     const char* preset;
+    float aod550 = 0.0f;  // 0 ならプリセットの量
 };
 constexpr Combo kCombos[] = {
     {"Hillaire2020", "C"},         {"Hillaire2020", "C+A"},        {"Hillaire2020", "C+B"},
@@ -37,6 +41,11 @@ constexpr Combo kCombos[] = {
     {"SpectralFit2020", "C+B"},    {"SpectralFit2020", "C+A+B"},   {"Hillaire2020", "base+A"},
     {"Hillaire2020", "base+B"},    {"Hillaire2020", "base+A+B"},   {"SpectralFit709", "base+B"},
     {"SpectralFit709", "base+A+B"}, {"SpectralFit2020", "base+B"}, {"SpectralFit2020", "base+A+B"},
+    {"Hillaire2020", "C+D"},       {"Hillaire2020", "C+A+B+D"},    {"SpectralFit709", "C+A+B+D"},
+    {"SpectralFit2020", "C+A+B+D"},
+    // AOD の上書き（design.md §5.10）。0.1 より薄い / 濃い量で、σ に倍率を掛けた媒質を GPU と Python で照合する
+    {"Hillaire2020", "C+A+B", 0.02f},   {"Hillaire2020", "C+A+B", 0.3f},  {"Hillaire2020", "C+A+B+D", 0.02f},
+    {"Hillaire2020", "C+A+B+D", 0.3f}, {"SpectralFit709", "C+A+B+D", 0.3f},
 };
 
 /// ファイル名: "+" を "_" に（"C+A+B" → "C_A_B"）
@@ -161,7 +170,11 @@ int runAerosolPresets(gfx::Device& device, const gfx::PipelineLibrary& pipelines
         atmosphere::AtmosphereParams params = defaults;
         params.aerosolPreset = combo.preset;
         params.applyCoefficientSet(*set);
-        const std::string stem = std::string(combo.set) + "_" + presetFileName(combo.preset);
+        std::string stem = std::string(combo.set) + "_" + presetFileName(combo.preset);
+        if (combo.aod550 > 0.0f) {
+            params.setAerosolAod550(*set->findAerosolPreset(combo.preset), combo.aod550);
+            stem += std::format("_aod{:g}", combo.aod550);
+        }
         auto meta = [&](const atmosphere::AtmosphereParams& p) {
             return nlohmann::json{{"color_space", display::toString(p.workingSpace)},
                                   {"coefficient_set", combo.set},
@@ -254,6 +267,12 @@ int runAerosolPresets(gfx::Device& device, const gfx::PipelineLibrary& pipelines
             io::saveExr(outDir / "ms" / "r_musun.exr", mn, mn, toFloats(msRMu.readback(device, 16)),
                         {{"units", "R = r [km], G = mu_sun"}});
         }
+        if (combo.aod550 > 0.0f) {
+            // AOD の上書きの組は V3i・V3j だけ（design.md §5.10）
+            gfx::log(std::format("aerosol_presets: {}", stem));
+            first = false;
+            continue;
+        }
         // 記録: Multi-scattering LUT の区間数と配置（Transmittance LUT を引く実用の設定）。AOD 0.1 で以前の既定の 20 区間
         //       （等間隔）が足りるかを見る（design.md §14 Phase 4.8）。Hillaire2020 の C・C+A+B だけ
         if (std::string_view(combo.set) == "Hillaire2020" &&
@@ -343,9 +362,10 @@ int runAerosolPresets(gfx::Device& device, const gfx::PipelineLibrary& pipelines
             }
         }
 
-        // V4b: 地表アルベド 0 の LUT 描画（Phase 4.7 のパストレースのダンプと比べる。Hillaire2020 の C と C+A+B）
+        // V4b: 地表アルベド 0 の LUT 描画（パストレースのダンプと比べる。Hillaire2020 の C・C+A+B・C+A+B+D）
         const std::string_view preset = combo.preset;
-        if (std::string_view(combo.set) == "Hillaire2020" && (preset == "C" || preset == "C+A+B")) {
+        if (std::string_view(combo.set) == "Hillaire2020" &&
+            (preset == "C" || preset == "C+A+B" || preset == "C+A+B+D")) {
             for (const Scenario& s : kV4bScenarios) {
                 atmosphere::AtmosphereParams p = params;
                 p.sunZenithDeg = s.sunZenithDeg;
@@ -367,6 +387,37 @@ int runAerosolPresets(gfx::Device& device, const gfx::PipelineLibrary& pipelines
     return 0;
 }
 
+// 地形ありの検証（V3c の空気遠近法・V3g の影の方式・V3d の空からの照度）を、2 成分のプリセットで回す（Phase 4.9）。
+// Mie の 2 枚目の LUT・ボリューム、合成の成分ごとの位相関数、影の方式 5 の成分ごとの差し引き、SH の成分ごとの求積を通す。
+// 同じ量（AOD 0.1）の 1 成分の C+A+B も描き、誤差が 2 成分の経路によるものか、濃い大気によるものかを分ける
+int runAerosolScene(gfx::Device& device, const gfx::PipelineLibrary& pipelines, const std::filesystem::path& outDir)
+{
+    std::vector<atmosphere::CoefficientSet> sets = atmosphere::loadCoefficientSets(kCoefficientPath);
+    const atmosphere::MiePhaseTables tables(device, sets);
+    const auto set = std::find_if(sets.begin(), sets.end(), [](const auto& s) { return s.name == "Hillaire2020"; });
+    for (const char* preset : {"C+A+B", "C+A+B+D"}) {
+        atmosphere::AtmosphereParams params = atmosphere::loadDefaultParams(kCoefficientPath);
+        params.aerosolPreset = preset;
+        params.applyCoefficientSet(*set);
+        if (params.aerosolPreset != preset) {
+            gfx::log(std::format("aerosol_scene: preset {} not applied", preset));
+            return 1;
+        }
+        const std::filesystem::path dir = outDir / presetFileName(preset);
+        if (int r = runAerialPerspectiveWithAtmosphere(device, pipelines, dir / "aerial_perspective", params); r != 0) {
+            return r;
+        }
+        if (int r = runShadowApMethodsWithAtmosphere(device, pipelines, dir / "shadow_ap_methods", params); r != 0) {
+            return r;
+        }
+        if (int r = runSkyIrradianceWithAtmosphere(device, pipelines, dir / "sky_irradiance", params); r != 0) {
+            return r;
+        }
+        gfx::log(std::format("aerosol_scene: {}", preset));
+    }
+    return 0;
+}
+
 } // namespace
 
 int runPhase48Test(gfx::Device& device, const gfx::PipelineLibrary& pipelines, std::string_view name,
@@ -375,6 +426,9 @@ int runPhase48Test(gfx::Device& device, const gfx::PipelineLibrary& pipelines, s
     std::filesystem::create_directories(outDir);
     if (name == "aerosol_presets") {
         return runAerosolPresets(device, pipelines, outDir);
+    }
+    if (name == "aerosol_scene") {
+        return runAerosolScene(device, pipelines, outDir);
     }
     gfx::log("Unknown test: " + std::string(name));
     return 2;

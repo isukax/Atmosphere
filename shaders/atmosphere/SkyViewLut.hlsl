@@ -7,6 +7,7 @@
 // 出力は 2 枚:
 //   gOutputUav        : Rayleigh の単散乱 + 多重散乱の輝度 [sr⁻¹]（単位照度あたり）
 //   gSkyViewMieLutUav : Mie の単散乱から位相関数を除いた ∫ T_view·σs_M·T_sun dt [無次元]
+//   gSkyViewMie1LutUav: Mie の成分 1 の同じ量（2 成分のプリセットだけ。design.md §5.9）
 // [POINT] Mie の位相関数は g が大きいと太陽の周りに鋭いピークを持ち（g = 0.99 で半値全幅 0.88°）、
 //         太陽の位置での LUT の縦の 1 テクセル（天頂角 35° で 2.6°）では表せない（design.md §14 の調査）。
 //         太陽は平行光なので 1 本の視線の上で散乱角 θ は一定で、Mie の単散乱は
@@ -52,4 +53,10 @@ void CSMain(uint3 id : SV_DispatchThreadID)
     output[id.xy] = float4(result.luminance, 1.0);
     RWTexture2D<float4> mieOutput = ResourceDescriptorHeap[gSkyViewMieLutUav];
     mieOutput[id.xy] = float4(result.mieSingleNoPhase, 1.0);
+#if MIE_GENERAL
+    if (gAtmosphere.mieComponentCount > 1) {
+        RWTexture2D<float4> mie1Output = ResourceDescriptorHeap[gSkyViewMie1LutUav];
+        mie1Output[id.xy] = float4(result.mie1SingleNoPhase, 1.0);
+    }
+#endif
 }

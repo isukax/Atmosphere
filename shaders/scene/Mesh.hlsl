@@ -28,15 +28,15 @@ cbuffer MeshConstants : register(b0)
     float  gPad9                        : packoffset(c9.w);
     float2 gTransmittanceLutSize        : packoffset(c10.x);
     uint   gUseSkyIrradiance            : packoffset(c10.z);
-    AtmosphereParameters gAtmosphere    : packoffset(c11);  // c11-c19
-    row_major float4x4 gShadowNearToUvz : packoffset(c20);  // カメラ相対 [m] → 近景のカスケードの (u, v, 深度)
-    row_major float4x4 gShadowFarToUvz  : packoffset(c24);  // カメラ相対 [m] → 全体のカスケードの (u, v, 深度)
-    uint   gShadowNearSrv               : packoffset(c28.x); // 無効値なら近景なし
-    uint   gShadowFarSrv                : packoffset(c28.y); // 無効値なら影なし
-    float  gShadowBlendBand             : packoffset(c28.z); // 近景の端で全体と混ぜる帯の幅（近景の半幅に対する割合）
-    uint   gOutputMode                  : packoffset(c28.w); // MESH_OUTPUT_*
-    float  gShadowNearNormalOffsetM     : packoffset(c29.x); // 法線オフセット [m]（近景）
-    float  gShadowFarNormalOffsetM      : packoffset(c29.y); // 法線オフセット [m]（全体）
+    AtmosphereParameters gAtmosphere    : packoffset(c11);  // c11-c20
+    row_major float4x4 gShadowNearToUvz : packoffset(c21);  // カメラ相対 [m] → 近景のカスケードの (u, v, 深度)
+    row_major float4x4 gShadowFarToUvz  : packoffset(c25);  // カメラ相対 [m] → 全体のカスケードの (u, v, 深度)
+    uint   gShadowNearSrv               : packoffset(c29.x); // 無効値なら近景なし
+    uint   gShadowFarSrv                : packoffset(c29.y); // 無効値なら影なし
+    float  gShadowBlendBand             : packoffset(c29.z); // 近景の端で全体と混ぜる帯の幅（近景の半幅に対する割合）
+    uint   gOutputMode                  : packoffset(c29.w); // MESH_OUTPUT_*
+    float  gShadowNearNormalOffsetM     : packoffset(c30.x); // 法線オフセット [m]（近景）
+    float  gShadowFarNormalOffsetM      : packoffset(c30.y); // 法線オフセット [m]（全体）
 };
 
 #define MESH_OUTPUT_SHADED 0

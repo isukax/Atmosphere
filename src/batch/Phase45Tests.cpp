@@ -225,7 +225,9 @@ int runShadowAerialPerspective(gfx::Device& device, const gfx::PipelineLibrary& 
 // V3g: 空気遠近法の影の方式の比較（design.md §5.6）
 // ---------------------------------------------------------------------------
 
-int runShadowApMethods(gfx::Device& device, const gfx::PipelineLibrary& pipelines, const std::filesystem::path& outDir)
+// aerosol: エアロゾルのプリセットを適用した大気（Phase 4.9 の "aerosol_scene"）。nullptr なら既定の大気とケースの g
+int runShadowApMethods(gfx::Device& device, const gfx::PipelineLibrary& pipelines, const std::filesystem::path& outDir,
+                       const atmosphere::AtmosphereParams* aerosol = nullptr)
 {
     atmosphere::AtmosphereRenderer atmo(device, pipelines, DXGI_FORMAT_R32G32B32A32_FLOAT);
     render::SceneRenderer sceneRenderer(device, pipelines);
@@ -251,10 +253,13 @@ int runShadowApMethods(gfx::Device& device, const gfx::PipelineLibrary& pipeline
         {"sunset_front", {0.0f, 300.0f, 0.0f}, 0.0f, -2.0f, 88.0f, -90.0f, 0.8f},
     };
     for (const Case& c : cases) {
-        atmosphere::AtmosphereParams params = atmosphere::loadDefaultParams(kSceneTestCoefficientPath);
+        atmosphere::AtmosphereParams params =
+            aerosol != nullptr ? *aerosol : atmosphere::loadDefaultParams(kSceneTestCoefficientPath);
         params.sunZenithDeg = c.sunZenithDeg;
         params.sunAzimuthDeg = c.sunAzimuthDeg;
-        params.miePhaseG = c.g;
+        if (aerosol == nullptr) {
+            params.miePhaseG = c.g;
+        }
         scene::Camera camera = testCamera();
         camera.positionM = c.cameraM;
         camera.yawRad = glm::radians(c.yawDeg);
@@ -329,6 +334,13 @@ int runShadowApMethods(gfx::Device& device, const gfx::PipelineLibrary& pipeline
 }
 
 } // namespace
+
+int runShadowApMethodsWithAtmosphere(gfx::Device& device, const gfx::PipelineLibrary& pipelines,
+                                     const std::filesystem::path& outDir, const atmosphere::AtmosphereParams& params)
+{
+    std::filesystem::create_directories(outDir);
+    return runShadowApMethods(device, pipelines, outDir, &params);
+}
 
 int runPhase45Test(gfx::Device& device, const gfx::PipelineLibrary& pipelines, std::string_view name,
                    const std::filesystem::path& outDir)

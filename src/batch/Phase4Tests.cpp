@@ -2,6 +2,7 @@
 
 #include "batch/SceneTestCommon.h"
 #include "atmosphere/AtmosphereRenderer.h"
+#include "atmosphere/MiePhaseTables.h"
 #include "display/DisplayPass.h"
 #include "gfx/GpuTimer.h"
 #include "io/ExrWriter.h"
@@ -34,8 +35,10 @@ std::vector<float> toFloats(const std::vector<uint8_t>& bytes)
 // V3c: 地形の空気遠近法
 // ---------------------------------------------------------------------------
 
+// aerosol: エアロゾルのプリセットを適用した大気（Phase 4.9 の "aerosol_scene"）。nullptr なら既定の大気で、g を変えた
+//          ケースも描く。プリセットのときは g はプリセットの値のまま（g を変えたケースは描かない）
 int runAerialPerspective(gfx::Device& device, const gfx::PipelineLibrary& pipelines,
-                         const std::filesystem::path& outDir)
+                         const std::filesystem::path& outDir, const atmosphere::AtmosphereParams* aerosol = nullptr)
 {
     constexpr uint32_t w = 640;
     constexpr uint32_t h = 360;
@@ -59,10 +62,15 @@ int runAerialPerspective(gfx::Device& device, const gfx::PipelineLibrary& pipeli
         {"sunset_front", 88.0f, -90.0f, 0.8f},
     };
     for (const Case& c : cases) {
-        atmosphere::AtmosphereParams params = atmosphere::loadDefaultParams(kCoefficientPath);
+        if (aerosol != nullptr && c.g != 0.8f) {
+            continue;
+        }
+        atmosphere::AtmosphereParams params = aerosol != nullptr ? *aerosol : atmosphere::loadDefaultParams(kCoefficientPath);
         params.sunZenithDeg = c.sunZenithDeg;
         params.sunAzimuthDeg = c.sunAzimuthDeg;
-        params.miePhaseG = c.g;
+        if (aerosol == nullptr) {
+            params.miePhaseG = c.g;
+        }
 
         atmosphere::SkyView view;
         view.invViewProjRot = glm::inverse(camera.projection(aspect) * camera.viewRotation());
@@ -230,7 +238,9 @@ int runApTransmittance(gfx::Device& device, const gfx::PipelineLibrary& pipeline
 // V3d: 空からの照度
 // ---------------------------------------------------------------------------
 
-int runSkyIrradiance(gfx::Device& device, const gfx::PipelineLibrary& pipelines, const std::filesystem::path& outDir)
+// aerosol: runAerialPerspective と同じ（プリセットのときは g を変えない）
+int runSkyIrradiance(gfx::Device& device, const gfx::PipelineLibrary& pipelines, const std::filesystem::path& outDir,
+                     const atmosphere::AtmosphereParams* aerosol = nullptr)
 {
     constexpr uint32_t w = 2048;
     constexpr uint32_t h = 1024;
@@ -239,9 +249,15 @@ int runSkyIrradiance(gfx::Device& device, const gfx::PipelineLibrary& pipelines,
     const atmosphere::AtmosphereQuality quality;
     nlohmann::json all = nlohmann::json::array();
     for (const float g : {0.8f, 0.99f}) {
+        if (aerosol != nullptr && g != 0.8f) {
+            continue;
+        }
         for (const float sunZenithDeg : {30.0f, 80.0f}) {
-            atmosphere::AtmosphereParams params = atmosphere::loadDefaultParams(kCoefficientPath);
-            params.miePhaseG = g;
+            atmosphere::AtmosphereParams params =
+                aerosol != nullptr ? *aerosol : atmosphere::loadDefaultParams(kCoefficientPath);
+            if (aerosol == nullptr) {
+                params.miePhaseG = g;
+            }
             params.sunZenithDeg = sunZenithDeg;
             const glm::vec3 camera(0.0f, params.bottomRadiusKm + 0.2f, 0.0f);
             atmosphere::SkyView view;
@@ -255,7 +271,8 @@ int runSkyIrradiance(gfx::Device& device, const gfx::PipelineLibrary& pipelines,
                 atmo.updateSkyIrradiance(cmd, device.upload(), params, camera);
                 atmo.renderSkyFromLut(cmd, device.upload(), params, view, image.uavIndex(), w, h);
             });
-            const std::string stem = std::format("sky_g{:g}_sz{:g}", g, sunZenithDeg);
+            const std::string stem = aerosol != nullptr ? std::format("sky_sz{:g}", sunZenithDeg)
+                                                        : std::format("sky_g{:g}_sz{:g}", g, sunZenithDeg);
             io::saveExr(outDir / (stem + ".exr"), w, h, toFloats(image.readback(device, 16)),
                         {{"units", "luminance per illuminance [sr^-1]"}, {"atmosphere", atmosphere::toJson(params)}});
             const std::vector<float> sh = toFloats(atmo.skyIrradiance().readback(device));
@@ -264,7 +281,7 @@ int runSkyIrradiance(gfx::Device& device, const gfx::PipelineLibrary& pipelines,
                 coefficients.push_back({sh[i * 4 + 0], sh[i * 4 + 1], sh[i * 4 + 2]});
             }
             all.push_back({{"image", stem + ".exr"},
-                           {"mie_phase_g", g},
+                           {"mie_phase_g", params.miePhaseG},
                            {"sun_zenith_deg", sunZenithDeg},
                            {"irradiance_sh_per_lux", coefficients}});
         }
@@ -290,6 +307,16 @@ int runPerf(gfx::Device& device, const gfx::PipelineLibrary& pipelines, const st
     atmosphere::AtmosphereParams params = atmosphere::loadDefaultParams(kCoefficientPath);
     params.sunZenithDeg = 45.0f;
     params.sunAzimuthDeg = -90.0f;
+    // Phase 4.9: Mie が 2 成分のプリセット（Hillaire2020 の C+A+B+D）でも、成分が増えるパスを測る（design.md §5.9 の V8）
+    std::vector<atmosphere::CoefficientSet> sets = atmosphere::loadCoefficientSets(kCoefficientPath);
+    const atmosphere::MiePhaseTables tables(device, sets);
+    atmosphere::AtmosphereParams paramsD = params;
+    paramsD.aerosolPreset = "C+A+B+D";
+    for (const atmosphere::CoefficientSet& s : sets) {
+        if (s.name == "Hillaire2020") {
+            paramsD.applyCoefficientSet(s);
+        }
+    }
 
     nlohmann::json report = nlohmann::json::object();
     report["adapter"] = device.adapterName();
@@ -410,6 +437,31 @@ int runPerf(gfx::Device& device, const gfx::PipelineLibrary& pipelines, const st
                 t = timer.begin(cmd, "sky_and_aerial_perspective_composite_per_pixel");
                 atmo.renderSkyFromLut(cmd, device.upload(), params, perPixelView, targets.color.uavIndex(), w, h);
                 timer.end(cmd, t);
+                // 2 成分のプリセット（C+A+B+D）: 上の同名のパスとの差が、Mie の成分 1 と自由大気の背景のコスト
+                atmo.invalidateLuts();
+                t = timer.begin(cmd, "transmittance_lut_500_c_a_b_d");
+                atmo.updateTransmittanceLut(cmd, device.upload(), paramsD, quality.transmittanceSteps);
+                timer.end(cmd, t);
+                t = timer.begin(cmd, "multiscattering_lut_40_c_a_b_d");
+                atmo.updateMultiScatteringLut(cmd, device.upload(), paramsD, quality.multiScatteringSteps,
+                                              atmosphere::SunTransmittanceMode::Lut, 0, gfx::kInvalidDescriptorIndex,
+                                              quality.multiScatteringUniformSteps);
+                timer.end(cmd, t);
+                t = timer.begin(cmd, "sky_view_lut_30_c_a_b_d");
+                atmo.updateSkyViewLut(cmd, device.upload(), paramsD, view.cameraPosKm, quality.skyViewSteps, true);
+                timer.end(cmd, t);
+                t = timer.begin(cmd, "aerial_perspective_volume_c_a_b_d");
+                atmo.updateAerialPerspective(cmd, device.upload(), paramsD, view, true);
+                timer.end(cmd, t);
+                t = timer.begin(cmd, "sky_irradiance_sh_c_a_b_d");
+                atmo.updateSkyIrradiance(cmd, device.upload(), paramsD, view.cameraPosKm);
+                timer.end(cmd, t);
+                t = timer.begin(cmd, "sky_and_aerial_perspective_composite_volume_rgb_t_c_a_b_d");
+                atmo.renderSkyFromLut(cmd, device.upload(), paramsD, rgbTView, targets.color.uavIndex(), w, h);
+                timer.end(cmd, t);
+                t = timer.begin(cmd, "sky_and_aerial_perspective_composite_per_pixel_c_a_b_d");
+                atmo.renderSkyFromLut(cmd, device.upload(), paramsD, perPixelView, targets.color.uavIndex(), w, h);
+                timer.end(cmd, t);
                 targets.color.transition(cmd, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
                 output.transition(cmd, D3D12_RESOURCE_STATE_RENDER_TARGET);
                 display::DisplayPassInput input;
@@ -448,6 +500,20 @@ int runPerf(gfx::Device& device, const gfx::PipelineLibrary& pipelines, const st
 }
 
 } // namespace
+
+int runAerialPerspectiveWithAtmosphere(gfx::Device& device, const gfx::PipelineLibrary& pipelines,
+                                       const std::filesystem::path& outDir, const atmosphere::AtmosphereParams& params)
+{
+    std::filesystem::create_directories(outDir);
+    return runAerialPerspective(device, pipelines, outDir, &params);
+}
+
+int runSkyIrradianceWithAtmosphere(gfx::Device& device, const gfx::PipelineLibrary& pipelines,
+                                   const std::filesystem::path& outDir, const atmosphere::AtmosphereParams& params)
+{
+    std::filesystem::create_directories(outDir);
+    return runSkyIrradiance(device, pipelines, outDir, &params);
+}
 
 int runPhase4Test(gfx::Device& device, const gfx::PipelineLibrary& pipelines, std::string_view name,
                   const std::filesystem::path& outDir)

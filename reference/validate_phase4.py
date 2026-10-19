@@ -58,9 +58,9 @@ def rel_rmse(test: np.ndarray, ref: np.ndarray) -> list[float]:
 
 
 # ---------------------------------------------------------------------- V3c
-def check_aerial_perspective(out_dir: Path) -> list[dict]:
+def check_aerial_perspective(out_dir: Path, cases=CASES) -> list[dict]:
     results = []
-    for case in CASES:
+    for case in cases:
         geometry, meta = read_exr(out_dir / f"{case}_geometry.exr")
         volume, _ = read_exr(out_dir / f"{case}_volume.exr")
         ray_rgb, _ = read_exr(out_dir / f"{case}_raymarch_rgb.exr")

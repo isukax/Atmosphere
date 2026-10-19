@@ -11,6 +11,7 @@ struct AerialPerspectiveSample
 {
     float3 rayleigh;    // Rayleigh の単散乱 [sr⁻¹]
     float3 mieNoPhase;  // Mie の単散乱（位相関数なし）[無次元]
+    float3 mie1NoPhase; // Mie の成分 1 の同じ量（1 成分なら 0。design.md §5.9）
     float3 multiple;    // 多重散乱 [sr⁻¹]
     float transmittance;  // 透過率の RGB 平均
 };
@@ -39,6 +40,13 @@ AerialPerspectiveSample SampleAerialPerspective(float2 uv, float distanceKm)
     s.rayleigh = fade * rayleigh.rgb;
     s.mieNoPhase = fade * apMie.SampleLevel(gLinearClamp, uvw, 0.0).rgb;
     s.multiple = fade * apMs.SampleLevel(gLinearClamp, uvw, 0.0).rgb;
+    s.mie1NoPhase = 0.0;
+#if MIE_GENERAL
+    if (gAtmosphere.mieComponentCount > 1) {
+        Texture3D<float4> apMie1 = ResourceDescriptorHeap[gAerialPerspectiveMie1Srv];
+        s.mie1NoPhase = fade * apMie1.SampleLevel(gLinearClamp, uvw, 0.0).rgb;
+    }
+#endif
     // 透過率は RGB の平均（論文・参照実装と同じ近似）。フェードは不透明度 (1 − T) に掛ける。
     s.transmittance = 1.0 - fade * (1.0 - rayleigh.a);
     return s;
@@ -56,14 +64,16 @@ bool IsSunVisible(OpaqueShadowParameters shadow, float3 viewDir, float distanceK
 //         ボリュームが担うのは、なめらかな F だけ。視線上の N 点で影を調べ、影の有無が変わった所だけ
 //         二分探索で詰めて、その位置で F を引く（ボリュームを引くのは区間の端の数だけ）。
 void ShadowedSingleScattering(float2 uv, float3 viewDir, float distanceKm, AerialPerspectiveSample end,
-                              out float3 rayleigh, out float3 mieNoPhase)
+                              out float3 rayleigh, out float3 mieNoPhase, out float3 mie1NoPhase)
 {
     const OpaqueShadowParameters shadow = LoadOpaqueShadow();
     const uint steps = max(gApPerPixelSteps, 1u);
     float3 sumRayleigh = 0.0;
     float3 sumMie = 0.0;
+    float3 sumMie1 = 0.0;  // Mie の成分ごとに位相関数が違うので、差し引きも成分ごと（design.md §5.9）
     float3 startRayleigh = 0.0;  // 今の区間の始点の F（カメラ = 0）
     float3 startMie = 0.0;
+    float3 startMie1 = 0.0;
     bool segmentLit = true;
     float previousT = 0.0;
     for (uint k = 0; k < steps; ++k) {
@@ -89,9 +99,15 @@ void ShadowedSingleScattering(float2 uv, float3 viewDir, float distanceKm, Aeria
             if (segmentLit) {
                 sumRayleigh += edge.rayleigh - startRayleigh;
                 sumMie += edge.mieNoPhase - startMie;
+#if MIE_GENERAL
+                sumMie1 += edge.mie1NoPhase - startMie1;
+#endif
             }
             startRayleigh = edge.rayleigh;
             startMie = edge.mieNoPhase;
+#if MIE_GENERAL
+            startMie1 = edge.mie1NoPhase;
+#endif
             segmentLit = lit;
         }
         previousT = t;
@@ -99,10 +115,14 @@ void ShadowedSingleScattering(float2 uv, float3 viewDir, float distanceKm, Aeria
     if (segmentLit) {
         sumRayleigh += end.rayleigh - startRayleigh;
         sumMie += end.mieNoPhase - startMie;
+#if MIE_GENERAL
+        sumMie1 += end.mie1NoPhase - startMie1;
+#endif
     }
     // 補間した F が単調でない所で、わずかに負になるのを防ぐ
     rayleigh = max(sumRayleigh, 0.0);
     mieNoPhase = max(sumMie, 0.0);
+    mie1NoPhase = max(sumMie1, 0.0);
 }
 
 [numthreads(8, 8, 1)]
@@ -115,7 +135,16 @@ void CSMain(uint3 id : SV_DispatchThreadID)
     // [POINT] Mie の単散乱は、LUT の「位相関数を除いた積分」[無次元] に、このピクセルの正確な散乱角での
     //         位相関数 p_M(θ) [sr⁻¹] を掛けて足す。LUT のテクセルより細い光輪（g → 1）も形が崩れない
     //         （Sky-View LUT に位相関数を焼き込むと、g = 0.99 でピークが縦に伸び 6〜97% に暗くなった。design.md §14）。
-    const float3 phaseMie = MiePhase(gAtmosphere, dot(viewDir, gSunDirection));
+    //         Mie が 2 成分なら、成分ごとの LUT にその成分の位相関数を掛ける（design.md §5.9）。
+    const float cosTheta = dot(viewDir, gSunDirection);
+    const float3 phaseMie = MiePhase(gAtmosphere, 0, cosTheta);
+#if MIE_GENERAL
+    // [POINT] HLSL の三項演算子は両辺を評価するので if で求める
+    float3 phaseMie1 = 0.0;
+    if (gAtmosphere.mieComponentCount > 1) {
+        phaseMie1 = MiePhase(gAtmosphere, 1, cosTheta);
+    }
+#endif
 
     if (gOutputMode == OUTPUT_CAMERA_FB && gDepthSrv != kInvalidDescriptorIndex) {
         Texture2D<float> depthTexture = ResourceDescriptorHeap[gDepthSrv];
@@ -127,10 +156,15 @@ void CSMain(uint3 id : SV_DispatchThreadID)
             const AerialPerspectiveSample end = SampleAerialPerspective(uv, distanceKm);
             float3 rayleigh = end.rayleigh;
             float3 mieNoPhase = end.mieNoPhase;
+            float3 mie1NoPhase = end.mie1NoPhase;
             if (gApShadowMethod == AP_SHADOW_PER_PIXEL && gShadowFarSrv != kInvalidDescriptorIndex) {
-                ShadowedSingleScattering(uv, viewDir, distanceKm, end, rayleigh, mieNoPhase);
+                ShadowedSingleScattering(uv, viewDir, distanceKm, end, rayleigh, mieNoPhase, mie1NoPhase);
             }
+#if MIE_GENERAL
+            const float3 inscatter = rayleigh + end.multiple + phaseMie * mieNoPhase + phaseMie1 * mie1NoPhase;
+#else
             const float3 inscatter = rayleigh + end.multiple + phaseMie * mieNoPhase;
+#endif
             // [POINT] 透過率（design.md §5.7）: ボリュームの A は RGB の平均で、遠景で R が暗く B が明るくなる
             //         （5〜20 km で ±6%、V3c）。Transmittance LUT の比なら RGB のまま求まる。スライス 0 の手前の
             //         フェードはボリュームのためのものなので、比の透過率には掛けない（d → 0 で正しく 1 に近づく）。
@@ -155,8 +189,13 @@ void CSMain(uint3 id : SV_DispatchThreadID)
 
     float3 rayleighAndMs;
     float3 mieNoPhase;
-    SampleSkyViewLuts(gCameraPosKm, viewDir, rayleighAndMs, mieNoPhase);
+    float3 mie1NoPhase;
+    SampleSkyViewLuts(gCameraPosKm, viewDir, rayleighAndMs, mieNoPhase, mie1NoPhase);
+#if MIE_GENERAL
+    float3 luminance = rayleighAndMs + phaseMie * mieNoPhase + phaseMie1 * mie1NoPhase;
+#else
     float3 luminance = rayleighAndMs + phaseMie * mieNoPhase;
+#endif
     if ((gFlags & SKY_FLAG_SUN_DISK) != 0) {
         luminance += SunDiskPerLux(gCameraPosKm, viewDir);
     }

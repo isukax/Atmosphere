@@ -47,13 +47,14 @@ file(MAKE_DIRECTORY ${SHADER_OUT_DIR})
 file(GLOB_RECURSE SHADER_HEADERS CONFIGURE_DEPENDS ${SHADER_SRC_DIR}/*.hlsli)
 
 set(SHADER_OUTPUTS)
+# 追加の引数は DXC にそのまま渡す（例: -D MIE_GENERAL=1）
 function(compile_shader source entry profile output_name)
   set(src ${SHADER_SRC_DIR}/${source})
   set(out ${SHADER_OUT_DIR}/${output_name}.cso)
   add_custom_command(
     OUTPUT ${out}
     COMMAND ${DXC_EXECUTABLE} -nologo -HV 2021 -WX -Zi -Qembed_debug
-            -I ${SHADER_SRC_DIR} -T ${profile} -E ${entry} -Fo ${out} ${src}
+            -I ${SHADER_SRC_DIR} -T ${profile} -E ${entry} ${ARGN} -Fo ${out} ${src}
     DEPENDS ${src} ${SHADER_HEADERS}
     COMMENT "dxc ${source} ${entry} (${profile})"
     VERBATIM)
@@ -71,6 +72,12 @@ compile_shader(atmosphere/SkyFromLut.hlsl CSMain cs_6_6 SkyFromLut_cs)
 compile_shader(atmosphere/PathTrace.hlsl CSMain cs_6_6 PathTrace_cs)
 compile_shader(atmosphere/AerialPerspective.hlsl CSMain cs_6_6 AerialPerspective_cs)
 compile_shader(atmosphere/SkyIrradiance.hlsl CSMain cs_6_6 SkyIrradiance_cs)
+# Mie の一般形（2 成分・自由大気の背景、design.md §5.9）の版。1 成分・背景なしのプリセットは上の版を使う
+# （成分 1 の分岐を残すと 1 成分でも GPU 時間が増えたため。AtmosphereCommon.hlsli の MIE_GENERAL）
+foreach(pass TransmittanceLut SkyRaymarch MultiScatteringLut SkyViewLut SkyFromLut PathTrace AerialPerspective
+             SkyIrradiance)
+  compile_shader(atmosphere/${pass}.hlsl CSMain cs_6_6 ${pass}_mie_cs -D MIE_GENERAL=1)
+endforeach()
 compile_shader(scene/Mesh.hlsl VSMain vs_6_6 Mesh_vs)
 compile_shader(scene/Mesh.hlsl PSMain ps_6_6 Mesh_ps)
 

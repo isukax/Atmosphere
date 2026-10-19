@@ -23,6 +23,7 @@
 #include <deque>
 #include <memory>
 #include <optional>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -49,6 +50,8 @@ private:
     void updateCamera();
     void applyCoefficientSet(int index);
     void applyAerosolPreset(const std::string& name);
+    /// AOD550 を今のプリセットに設定する（nullopt ならプリセットの量に戻す。design.md §5.10）
+    void setAerosolAod550(std::optional<float> aod550);
     void drawAtmosphereUi();
     void drawPixelPickerUi(const ImVec2& pos, float width);
     void drawGpuTimeUi(const ImVec2& pos, float width);

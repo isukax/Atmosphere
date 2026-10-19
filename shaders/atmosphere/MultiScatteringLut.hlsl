@@ -13,17 +13,17 @@
 
 cbuffer MultiScatteringLutConstants : register(b0)
 {
-    AtmosphereParameters gAtmosphere : packoffset(c0);   // c0-c8
-    uint   gOutputUav                : packoffset(c9.x);
-    uint   gWidth                    : packoffset(c9.y);
-    uint   gHeight                   : packoffset(c9.z);
-    uint   gStepCount                : packoffset(c9.w);
-    uint   gTransmittanceLutSrv      : packoffset(c10.x);
-    uint   gSunTransmittanceMode     : packoffset(c10.y);
-    uint   gNestedSteps              : packoffset(c10.z);
-    uint   gDebugUav                 : packoffset(c10.w);  // 検証用: 各テクセルの (r [km], μs)。不要なら無効値
-    float2 gTransmittanceLutSize     : packoffset(c11.x);
-    uint   gUniformSteps             : packoffset(c11.z);  // 1: 区間を等間隔に置く（比較用）/ 0: 2 次配置（既定、design.md §12 Q8）
+    AtmosphereParameters gAtmosphere : packoffset(c0);   // c0-c9
+    uint   gOutputUav                : packoffset(c10.x);
+    uint   gWidth                    : packoffset(c10.y);
+    uint   gHeight                   : packoffset(c10.z);
+    uint   gStepCount                : packoffset(c10.w);
+    uint   gTransmittanceLutSrv      : packoffset(c11.x);
+    uint   gSunTransmittanceMode     : packoffset(c11.y);
+    uint   gNestedSteps              : packoffset(c11.z);
+    uint   gDebugUav                 : packoffset(c11.w);  // 検証用: 各テクセルの (r [km], μs)。不要なら無効値
+    float2 gTransmittanceLutSize     : packoffset(c12.x);
+    uint   gUniformSteps             : packoffset(c12.z);  // 1: 区間を等間隔に置く（比較用）/ 0: 2 次配置（既定、design.md §12 Q8）
 };
 
 static const uint kSqrtDirectionCount = 8;

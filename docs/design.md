@@ -585,6 +585,50 @@ research.md §12 の変種を、そのままプリセットにする（同じ定
 - プリセットは `data/atmosphere_coefficients.json` の各係数セットに入る（7 つ、2026-10-18 に `base+A`・`base+B`・`base+A+B` を足して 10 個。`derive_coefficients.py` が `aerosol_models.py` の定義から作る）。UI の「Aerosol preset」で選ぶ。2 成分のプリセットは Phase 4.9 まで選べない。Mie g のスライダーは Cornette-Shanks のプリセットだけで有効で、動かすと「(modified)」として記録する（上の「プリセット」）。
 - Multi-scattering LUT の既定を 40 区間・2 次配置に変えた（§12 Q8 の更新）。AOD 0.1 で等間隔 20 区間が足りなかったため（§14 Phase 4.8）。
 
+**実装の記録（Phase 4.9、2026-10-18）**
+- `AtmosphereParameters` / `AtmosphereGpu` を 9 行から 10 行にした（c9 に成分 0・1 の背景の a・H_FT）。後ろの cbuffer（`SkyPassConstants` 35 → 37 行、Transmittance / Multi-scattering LUT、`MeshConstants`）を 1 行ずらし、`SkyPassConstants` の最後の行 c36 に Mie の成分 1 の Sky-View LUT・空気遠近法のボリュームの UAV / SRV を足した。
+- `SampleMedium` は成分ごとの σs（`mieScattering`・`mie1Scattering`）を返し、密度は `MieDensity`（境界層 + 背景）。`MiePhase(a, 成分, cosθ)`。`IntegrateScatteredLuminance` は位相関数を成分ごとに掛け、`mie1SingleNoPhase` を出す。
+- Mie の成分 1 の LUT（`SkyViewMie1Lut`、192×108）とボリューム（`AerialPerspectiveMie1`、32³）は常に確保し、書き込み・読み出しは `mieComponentCount > 1` のときだけ（1 成分の描画は Phase 4.8 と同じ）。合成（空・地形）、影の方式 5 の差し引き、SH の求積は成分ごと。
+- パストレーサーの解析式の媒質: 2 成分は別の関数 `TraceChannelTwoMie`（σs の比で成分を選び、その成分の g の Henyey-Greenstein で方向を選ぶ。表の媒質と同じ作り）。1 成分の `TraceChannel` は Phase 4.8 のコードのまま残した（同じ式でも形を変えるとコンパイラの演算の並びが変わり、パストレースの回帰が最大 5.4×10⁻⁶ ずれた。経路の分岐は変わらず、画素の 2% が丸めの大きさでずれただけ）。上限 σ̄ は背景・成分 1 があるときだけ項を足す。
+- C++: `AtmosphereParams` は成分 0 のスカラーのまま、背景（`mieFreeTropDensity`・`mieFreeTropScaleHeightKm`）と `mieComponentCount`・`mie1`（`MieComponentParams`）を足した。JSON の背景の 2 キーは必須（H_FT ≤ 0 は例外）。サイドカーに `mie_free_troposphere_*`・`mie_component_count`・`mie1` を足した（`atmosphere_ref.py` の `from_meta` が読む）。
+- UI: 2 成分のプリセットを選べるようにし、成分ごとの σ・鉛直分布・背景を表示する。Mie g のスライダーは 2 成分では無効（どちらの成分の g かが曖昧なため）。デバッグ表示に成分 1 の Sky-View LUT。
+- Python: `aerosol_models.Profile` に背景の項（a、H_FT）、`with_free_troposphere`（a を柱から解き、float32 に丸める）。fine の背景は fine の AOD の 0.15 / 0.7、a = 0.1636。`atmosphere_ref.py` は成分 1（`mie1_*`）と背景を持ち、両成分の h_top で積分区間を分ける。
+- batch: `aerosol_presets` に `C+D`（Hillaire2020）・`C+A+B+D`（3 セット）と V4b の `C+A+B+D` を足し、`aerosol_scene`（`C+A+B+D` の V3c・V3g・V3d と同じ描画）を新設した。`perf` は `C+A+B+D` の毎フレームのパスも測る（`*_c_a_b_d`）。検証は `reference/validate_phase4_9.py`。
+- シェーダーの 2 つの版（2026-10-19）: 成分 1 の分岐や変数を残すと、1 成分のプリセットでもループの命令とレジスタが増え、GPU 時間が 10〜30% 増えた。そこで媒質を扱う 8 つのパス（Transmittance / Multi-scattering / Sky-View LUT、合成、レイマーチ、パストレーサー、空気遠近法のボリューム、SH）を `MIE_GENERAL` = 0 / 1 の 2 通りにコンパイルする（`*_cs` / `*_mie_cs`、CMakeLists.txt）。0 の版は成分 1 と背景の項を読まない（Phase 4.8 と同じコード）。C++ は `usesGeneralMieMedium(params)`（成分が 2 つか、背景の a > 0）で版を選ぶ（`MediumPso`、`AtmosphereRenderer`・`PathTracer`）。パストレーサーの表の媒質（V4b）は版によらない。回帰は §14 Phase 4.10。
+
+### 5.10 UI から AOD を変える（2026-10-19、Phase 4.10）
+
+背景: AOD は天候で最も変わる値で、見た目への効果も最も大きい（research.md §12）。プリセット（粒子の種類・鉛直分布）とは別の軸として、実行時に UI から変えられるようにする。
+
+**決めたこと（§12 Q26）**
+- UI では AOD550 の絶対値を動かす（対数スライダー、0.001〜1.0）。観測値や天候の値をそのまま入れられるように。
+- UI で決めた AOD は、プリセットや係数セットを替えても保つ（量 = 天候、プリセット = 粒子の種類）。一度も動かしていなければプリセットの量（`base` 系 0.0053、C 系 0.1）。「Reset AOD」でプリセットの量に戻す。
+- 検証は GPU と Python の照合（V3i・V3j）と AOD の整合だけ。基準は AOD 0.1 までで決めたものなので、0.1 より濃い組は記録として扱い、UI にも「(> 0.1: not validated)」と出す。
+
+**方式**
+- 同じ粒子・同じ鉛直分布なら、σs と σa は AOD に比例する。単散乱アルベド・波長依存・位相関数・鉛直分布（h_top、H、背景の a・H_FT）・fine と coarse の割合・背景の割合は変わらない。実行時に Mie の計算は要らない。
+
+  k = AOD550 / プリセットの AOD550、σs = k · σs(プリセット)、σa = k · σa(プリセット)（全成分・RGB に同じ k）
+
+- `AtmosphereParams` には k を掛けた後の σ を入れる。`toGpu`・LUT を作り直す判定（`AtmosphereGpu` の比較）・パストレースの累積のリセット・サイドカー・`atmosphere_ref.from_meta` は、何も変えずに新しい σ を使う。σ を変えると Transmittance・Multi-scattering LUT が作り直される（V8: Transmittance LUT 0.04 ms、Multi-scattering LUT は 20 区間で 0.03 ms。§14 Phase 4。今の既定の 40 区間では未計測）。
+- σ は毎回プリセットの値から計算し直す（スライダーを動かすたびに掛け算を重ねない）。上書きがなければ倍率を掛けず、プリセットの値そのものにする（回帰で 1 ビットも変わらないように）。
+- 基準の AOD550 は JSON のプリセットに `aod550` として持つ（`derive_coefficients.py`、`aerosol_models.preset_aod550`）。分光フィットのセットでは G チャンネルが 550 nm の値と違うので、σ から逆算しない。
+
+**実装**
+- JSON: プリセットごとに `aod550`（必須、> 0）。
+- `AtmosphereParams`: `aerosolPresetAod550`（今のプリセットの値）、`aerosolAod550Override`（`std::optional<float>`、UI の値）、`setAerosolAod550(preset, aod)`（nullopt でリセット）、`aerosolAod550()`。`applyAerosolPreset` は上書きがあれば新しいプリセットの係数に掛ける。g の変更を表していた `aerosolPresetModified` は `miePhaseGModified` に名前を変え、`aerosolPresetModified()` は「g か AOD を変えた」にした（ラベルの「(modified)」）。
+- サイドカー: `aerosol_preset_name`（元の名前）・`aerosol_aod550`・`aerosol_preset_aod550`・`aerosol_aod550_overridden`・`mie_phase_g_modified`。`aerosol_preset` は「(modified)」が付くことがあるので、`atmosphere_ref.from_meta` は位相関数の表を `aerosol_preset_name` で引く（付いた名前では JSON の表を見つけられない）。
+- UI: 「Aerosol preset」の下に AOD 550 のスライダーと「Reset AOD」、実効の AOD（RGB）= プリセットの `aod_rgb` × k。
+- batch: `aerosol_presets` の `kCombos` に AOD の上書きの組（`Combo::aod550`、Hillaire2020 の `C+A+B`・`C+A+B+D` を 0.02 / 0.3、SpectralFit709 の `C+A+B+D` を 0.3）。V3i・V3j のダンプだけを書く（ファイル名の末尾に `_aod<値>`）。検証は `reference/validate_phase4_10.py`。
+
+**検証**
+
+| ID | 比較 | 基準 |
+|---|---|---|
+| 回帰 | 上書きなしの `aerosol_presets` と、`base` の V1〜V9 のバッチ（13 種）を Phase 4.9 のダンプと比べる | 最大相対差 < 10⁻⁶ |
+| AOD | 上書きした組のサイドカーの σ・鉛直分布から求めた AOD が目標と一致（Hillaire2020 は AOD550、分光フィットのセットは `aod_rgb` × k）。σ はプリセット × k、鉛直分布・位相関数・g はプリセットのまま | 相対差 < 10⁻⁵ |
+| V3i・V3j | §5.9 と同じ（GPU vs Python 倍精度） | §5.9 と同じ。AOD 0.3 は記録 |
+
 ## 6. シーン
 
 - 地形: 40 km × 40 km の格子（512² 区間、約 78 m 間隔）。fBm で最大標高 約 3,000 m。原点の周り（半径 2 km）は標高 0 m の平地にして、半径 2〜8 km でなめらかに山へつなぐ（カメラの初期位置）。アルベドは定数（既定 0.18）。法線は高さの中心差分から計算。頂点は構造化バッファから頂点シェーダーで読む（Bindless、入力レイアウトなし）。
@@ -790,6 +834,8 @@ float3 skyFb = SampleSkyViewLut(uv) * (gSunIlluminanceLux * gExposureScale);
 | Q23 | 鉛直分布の持ち方、色空間ごとの Mie の係数、既定のプリセット | 鉛直分布は境界層の解析式（表は持たない）。`SpectralFit709` / `2020` は分光フィットに Mie を加える。既定は今の大気（`Hillaire2020` + `base`）（2026-10-18） |
 | Q24 | 実装の段階 | Phase 4.8 で 1 成分のプリセット、Phase 4.9 で 2 成分（D）（2026-10-18） |
 | Q25 | D の鉛直分布に自由大気の背景を持たせるか（research.md §13） | 持たせる。解析式に a · exp(−h / H_FT) の項を足し、Phase 4.9 で 2 成分と一緒に入れる。初期値は fine の成分だけに全体の AOD の 15%、H_FT = 3 km（§5.9「自由大気の背景の項」）（2026-10-18） |
+| Q26 | UI から AOD を変えるときの操作の単位・プリセットを替えたときの扱い・検証の範囲（§5.10） | AOD550 の絶対値（対数スライダー）。プリセット・係数セットを替えても UI の AOD を保つ。検証は GPU vs Python（V3i・V3j）と AOD の整合だけで、0.1 より濃い組は記録（2026-10-19） |
+| Q27 | 作業ツリーに残っていたシェーダーの 2 つの版（`MIE_GENERAL`、C++ の版の選択が未実装で 2 成分と背景が無視される状態）の扱い | C++ 側を仕上げる（`usesGeneralMieMedium`・`MediumPso`、§5.9 の実装の記録）（2026-10-19） |
 
 ---
 
@@ -806,6 +852,7 @@ float3 skyFb = SampleSkyViewLut(uv) * (gSunIlluminanceLux * gExposureScale);
 | 4.7 | 現実的なエアロゾルでの多重散乱の近似の検証（§5.8）。パストレーサーの表の媒質、媒質の書き出し、Python の近似との比較 | V4b-1, V4b-2（2026-10-17: 実装済み。V4b-1 合格、V4b-2 不合格。結果は §14）。見た目の比較（地表アルベド 0.3 の画面、2026-10-18、記録のみ） |
 | 4.8 | エアロゾルのプリセット（1 成分、§5.9）: `aerosol_models.py`、`derive_coefficients.py` への Mie の分光フィットの追加、JSON のプリセット、媒質の一般化（解析式の鉛直分布・位相関数の表）、UI の切り替え | 回帰（`base`）, V3i, V3j, V3k, V3b, V4b, V9（2026-10-18: 実装済み。V3i は既知の限界として不合格を記録、ほかは合格。Multi-scattering LUT の既定を 40 区間・2 次配置に変更（§12 Q8）。結果は §14） |
 | 4.9 | エアロゾルのプリセット（2 成分、D）: Sky-View の Mie LUT・空気遠近法の Mie ボリューム・SH・影の方式 5 を成分ごとに。鉛直分布の自由大気の背景の項（§5.9、§12 Q25） | 回帰、背景の項の確認、V3i, V3j, V3k, V3b, V4b, V8（計画） |
+| 4.10 | UI から AOD を変える（§5.10、§12 Q26）。シェーダーの 2 つの版の C++ 側の選択（§5.9、§12 Q27） | 回帰、AOD の整合、V3i, V3j（2026-10-19: 実装済み。回帰・AOD の整合・V3j は合格、V3i は既知の限界（地面すれすれの透過率、D の地表の単散乱）として不合格を記録。結果は §14） |
 | 5 | Shoga 移植設計のレビュー（§9 の境界の見直し） | 設計レビュー |
 
 ---
@@ -1305,6 +1352,35 @@ V4b-2（Python の近似 vs パストレース）。ΔE_ITP は GT7 SDR・自動
 - **V9（記録）**: ΔE_ITP の平均は SpectralFit709 で 3.7〜9.4、SpectralFit2020 で 1.4〜3.2。今の大気の V9（Phase 3: 709 で 3.8〜9.0、2020 で 1.4〜3.2）とほぼ同じ。粒子 1 個あたりの消散を AOD 0.1 の大きさでフィットした値を薄い量にそのまま使っている（§5.9）が、それによる悪化は見えない。輝度の誤差の平均は 709 で +4.3% / +3.3% / −1.5%（30 / 60 / 85°）、2020 で −2.1% / −1.9% / +0.7%。
 - V4b（パストレースとの比較）は行っていない（この量のパストレースのダンプがない）。
 - 画面での確認は、ほかのプリセットと同じく行っていない（ビルドと起動前の処理まで）。
+
+### Phase 4.10（2026-10-19、AMD Radeon RX 7800 XT）
+
+UI から AOD を変える（§5.10）と、シェーダーの 2 つの版の C++ 側の選択（§5.9 の実装の記録、§12 Q27）。検証のバッチは `aerosol_presets`（ダンプ `dumps/aod_override`）、照合は `reference/validate_phase4_10.py`。
+
+**回帰: 合格**
+- AOD を上書きしない `aerosol_presets`（1 成分は `MIE_GENERAL` = 0、2 成分は 1 の版）vs Phase 4.9 のダンプ（`dumps/phase4_9`、版を分ける前）: 784 ファイル、最大相対差 3.4×10⁻⁷。
+- `base` の 13 種のバッチ（transmittance・single_scattering・multiscattering・sky_lut・sun_closeup・spectral・pathtrace・aerial_perspective・ap_transmittance・sky_irradiance・shadow_surface・shadow_aerial_perspective・shadow_ap_methods）vs `dumps/regress_4_9`: 237 ファイル、最大相対差 5.1×10⁻⁷。
+- JSON の作り直しで変わったのは、プリセットごとの `aod550`（30 個）と単位の説明だけ。
+
+**AOD の整合（基準 < 1×10⁻⁵）: 5 件すべて合格**。サイドカーの σ・鉛直分布から求めた AOD の相対差は最大 7.4×10⁻⁸、σ = プリセット × k の相対差は最大 1.1×10⁻⁷。鉛直分布・位相関数・g はプリセットのまま。サイドカーの `aerosol_preset_name`・`aerosol_aod550_overridden` も正しい。
+
+**V3i・V3j（基準は §5.9 と同じ。AOD 0.3 は記録）**
+
+| 組 | Transmittance LUT（最大相対誤差） | 単散乱（最大、6 件） | Ψ_ms（最大） |
+|---|---|---|---|
+| Hillaire2020 `C+A+B` AOD 0.02 | **1.76×10⁻³（不合格）** | 7.97×10⁻⁴（合格） | 6.2×10⁻⁴（合格） |
+| Hillaire2020 `C+A+B+D` AOD 0.02 | **1.80×10⁻³（不合格）** | **1.09×10⁻³（2 件不合格）** | 3.4×10⁻⁴（合格） |
+| Hillaire2020 `C+A+B` AOD 0.3（記録） | 6.2×10⁻³ | 1.37×10⁻² | 3.2×10⁻³ |
+| Hillaire2020 `C+A+B+D` AOD 0.3（記録） | 1.28×10⁻² | 5.5×10⁻³ | 4.0×10⁻³ |
+| SpectralFit709 `C+A+B+D` AOD 0.3（記録） | 1.34×10⁻² | 5.8×10⁻³ | 3.1×10⁻³ |
+| 参考: Hillaire2020 `C+A+B+D` AOD 0.1（Phase 4.9） | 7.8×10⁻³ | 2.1×10⁻³ | 1.7×10⁻³ |
+
+- Transmittance LUT の不合格は Phase 4.8 と同じ既知の限界。誤差は LUT の最後の列（地面すれすれの光線、τ ≈ 24、T ≈ 5×10⁻¹¹）に集まり、区間数を 4000 にしても減らない（`C+A+B` AOD 0.02 で 1.64〜1.91×10⁻³）。光学的厚さの絶対誤差が τ の 10⁻⁴ 程度あり、T の相対誤差は τ に比例して増える。`base`（AOD 0.005）は合格、AOD 0.02 は境目、0.1 以上は外れる。
+- `C+A+B+D` の地表の単散乱（h = 0.2 km、太陽天頂角 30°・60°）の不合格は Phase 4.9 と同じ（AOD 0.1 で 1.3〜2.1×10⁻³）。太陽方向の区間数を 4 倍にしても 9.6×10⁻⁴ で止まる。AOD 0.02 では 1.06〜1.09×10⁻³ と基準のすぐ上。
+- AOD の倍率は σ に掛けるだけなので、上の誤差は AOD の機能によるものではなく、同じ光学的厚さの大気での既知の限界と同じものと判断した。基準は変えない。
+- Multi-scattering LUT の既定の設定（40 区間・2 次配置）の最大相対誤差（記録、64 点）は、`C+A+B+D` で AOD 0.02 / 0.1 / 0.3 が 6.0% / 21.9% / 36.1%（SpectralFit709 の 0.3 は 31%）。AOD とともに増える。
+
+**画面での確認**: UI の AOD スライダー・「Reset AOD」・プリセットを替えたときに AOD が保たれることは、ビルドまでで、実際の画面では確かめていない（`setAerosolAod550` は batch の組で通っているが、プリセットを替えたときに上書きを掛け直す経路は通っていない）。
 
 ---
 

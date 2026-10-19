@@ -31,11 +31,14 @@ BASE_MIE_ABSORPTION = 0.444e-3
 BASE_MIE_SCALE_HEIGHT = 1.2
 BASE_G = 0.8
 # 案 D の鉛直分布（仮定）: fine は境界層 1.5 km、coarse はより低い 1.0 km。上端から 0.3 km で減る。
-# 晴れた日の昼の代表値として文献の範囲に入る（research.md §13）。自由大気の背景の項は Phase 4.9 で足す
-# （design.md §5.9「自由大気の背景の項」）
+# 晴れた日の昼の代表値として文献の範囲に入る（research.md §13）
 FINE_LAYER_TOP_KM = 1.5
 COARSE_LAYER_TOP_KM = 1.0
 LAYER_DECAY_KM = 0.3
+# 自由大気の背景（design.md §5.9「自由大気の背景の項」、§12 Q25）: fine の成分にだけ、全体の AOD の 15% を
+# スケールハイト 3 km の指数分布で持たせる（CALIOP では中緯度の AOD の 10〜25% が自由大気にある）
+FREE_TROP_FRACTION_OF_AOD = 0.15
+FREE_TROP_SCALE_HEIGHT_KM = 3.0
 
 # base+A / base+B / base+A+B は base の量（AOD550 ≈ 0.005）で A・B だけを入れたもの（C 系と同じ作り方）
 PRESET_NAMES = ("base", "base+A", "base+B", "base+A+B", "C", "C+A", "C+B", "C+A+B", "C+D", "C+A+B+D")
@@ -44,14 +47,28 @@ PRESET_NAMES = ("base", "base+A", "base+B", "base+A+B", "C", "C+A", "C+B", "C+A+
 # ---------------------------------------------------------------------- 鉛直分布
 @dataclass(frozen=True)
 class Profile:
-    """ρ(h) = exp(−max(h − h_top, 0) / H)（GPU の SampleMedium と同じ解析式）。
-    h_top = 0 なら指数分布、h_top > 0 なら境界層（上端まで一様、その上は H で減る）。"""
+    """ρ(h) = exp(−max(h − h_top, 0) / H) + a·exp(−h / H_FT)（GPU の SampleMedium と同じ解析式）。
+    第 1 項: h_top = 0 なら指数分布、h_top > 0 なら境界層（上端まで一様、その上は H で減る）。
+    第 2 項: 自由大気の背景（a = 0 ならなし）。σs・σa は第 1 項の密度 1 あたりの値なので、地表の密度は 1 + a。"""
 
     top_km: float
     scale_height_km: float
+    free_trop_density: float = 0.0
+    free_trop_scale_height_km: float = 1.0
+
+    def boundary_layer(self, h: np.ndarray) -> np.ndarray:
+        return np.exp(-np.maximum(np.asarray(h, dtype=np.float64) - self.top_km, 0.0) / self.scale_height_km)
+
+    def free_troposphere(self, h: np.ndarray) -> np.ndarray:
+        return self.free_trop_density * np.exp(-np.asarray(h, dtype=np.float64) / self.free_trop_scale_height_km)
 
     def __call__(self, h: np.ndarray) -> np.ndarray:
-        return np.exp(-np.maximum(np.asarray(h, dtype=np.float64) - self.top_km, 0.0) / self.scale_height_km)
+        return self.boundary_layer(h) + self.free_troposphere(h)
+
+    def free_troposphere_fraction(self) -> float:
+        """柱のうち背景の項が持つ割合（成分の AOD に対して）"""
+
+        return column_km(self.free_troposphere) / column_km(self)
 
 
 def exponential_profile(scale_height_km: float) -> Profile:
@@ -62,6 +79,15 @@ def boundary_layer_profile(top_km: float, decay_km: float) -> Profile:
     """境界層: 上端まで一様、その上は decay_km で指数的に減る（よく混ざった層の上端で急に澄む形）。"""
 
     return Profile(top_km, decay_km)
+
+
+def with_free_troposphere(profile: Profile, fraction: float, scale_height_km: float) -> Profile:
+    """profile に、成分の AOD の fraction を持つ背景の項 a·exp(−h / H_FT) を足す。
+    a = (f / (1 − f)) × 柱_第1項 / 柱_exp(−h/H_FT)。a は float32 に丸める（GPU と同じ値で柱と σ を求めるため）。"""
+
+    shape = Profile(0.0, 1.0, 1.0, scale_height_km)
+    a = fraction / (1.0 - fraction) * column_km(profile.boundary_layer) / column_km(shape.free_troposphere)
+    return Profile(profile.top_km, profile.scale_height_km, float(np.float32(a)), scale_height_km)
 
 
 def column_km(profile: Callable[[np.ndarray], np.ndarray]) -> float:
@@ -251,7 +277,9 @@ def build_variants(rayleigh: np.ndarray, ozone: np.ndarray, fine: ModeOptics, co
             return MieComponent("mie", s, a, profile, PhaseTable(p))
         return MieComponent("mie", s, a, profile, cs)
 
-    fine_profile = boundary_layer_profile(FINE_LAYER_TOP_KM, LAYER_DECAY_KM)
+    # [POINT] 背景は fine の AOD（0.7）の一部として持つ。fine と coarse の AOD の割合は変えない
+    fine_profile = with_free_troposphere(boundary_layer_profile(FINE_LAYER_TOP_KM, LAYER_DECAY_KM),
+                                         FREE_TROP_FRACTION_OF_AOD / FINE_FRACTION_OF_AOD, FREE_TROP_SCALE_HEIGHT_KM)
     coarse_profile = boundary_layer_profile(COARSE_LAYER_TOP_KM, LAYER_DECAY_KM)
 
     def split_d(aod: float, spectral: bool, phase_from_mie: bool) -> list[MieComponent]:
@@ -300,6 +328,9 @@ def component_to_json(comp: MieComponent) -> dict:
         raise TypeError("profile must be Profile (analytic, design.md §5.9)")
     out["boundary_layer_top_km"] = comp.profile.top_km
     out["scale_height_km"] = comp.profile.scale_height_km
+    out["free_troposphere_density"] = comp.profile.free_trop_density
+    out["free_troposphere_scale_height_km"] = comp.profile.free_trop_scale_height_km
+    out["free_troposphere_aod_fraction"] = comp.profile.free_troposphere_fraction()  # 記録（成分の AOD に対して）
     if isinstance(comp.phase, CornetteShanks):
         out["phase"] = {"model": "cornette_shanks", "g": comp.phase.g}
     elif isinstance(comp.phase, PhaseTable):
@@ -313,7 +344,8 @@ def component_to_json(comp: MieComponent) -> dict:
 
 
 def component_from_json(j: dict) -> MieComponent:
-    profile = Profile(float(j["boundary_layer_top_km"]), float(j["scale_height_km"]))
+    profile = Profile(float(j["boundary_layer_top_km"]), float(j["scale_height_km"]),
+                      float(j["free_troposphere_density"]), float(j["free_troposphere_scale_height_km"]))
     ph = j["phase"]
     phase = CornetteShanks(float(ph["g"])) if ph["model"] == "cornette_shanks" else PhaseTable(np.asarray(ph["values_rgb"]))
     return MieComponent(j["name"], np.asarray(j["scattering_per_km"], dtype=np.float64),

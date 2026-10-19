@@ -233,7 +233,7 @@ METHODS = (("method0_volume_point", "0: volume (point)"), ("method1_volume_filte
 METHOD_CASES = ("ground_sz83", "low_front", "sunset_front")
 
 
-def check_ap_methods(out_dir: Path) -> list[dict]:
+def check_ap_methods(out_dir: Path, image_prefix: str = "phase4_5") -> list[dict]:
     results = []
     rows = []
     for case in METHOD_CASES:
@@ -263,7 +263,7 @@ def check_ap_methods(out_dir: Path) -> list[dict]:
             tiles += [tonemap_srgb(img * scale), np.ones((img.shape[0], 4, 3))]
         tiles += [tonemap_srgb(ref * scale)]
         rows += [np.concatenate(tiles, axis=1), np.ones((4, 4 * 640 + 12, 3))]
-    write_png(ROOT / "docs" / "images" / "phase4_5_ap_methods.png", np.concatenate(rows[:-1]))
+    write_png(ROOT / "docs" / "images" / f"{image_prefix}_ap_methods.png", np.concatenate(rows[:-1]))
 
     # 地表 1 m のケースの拡大（球の影が空気に入る所）と、基準との相対誤差（赤 = 明るすぎ、青 = 暗すぎ、0〜10%）
     case = "ground_sz83"
@@ -280,7 +280,7 @@ def check_ap_methods(out_dir: Path) -> list[dict]:
         crop_err = err[y0:y1, x0:x1].repeat(2, 0).repeat(2, 1)
         zoom_rows += [np.concatenate([crop, np.ones((crop.shape[0], 4, 3)), crop_err], axis=1),
                       np.ones((4, crop.shape[1] * 2 + 4, 3))]
-    write_png(ROOT / "docs" / "images" / "phase4_5_ap_methods_error.png", np.concatenate(zoom_rows[:-1]))
+    write_png(ROOT / "docs" / "images" / f"{image_prefix}_ap_methods_error.png", np.concatenate(zoom_rows[:-1]))
     return results
 
 

@@ -40,6 +40,7 @@ void CSMain(uint3 thread : SV_GroupThreadID)
     }
     float3 rayleighAndMs;
     float3 mieNoPhase;
+    float3 mie1NoPhase;
     // Rayleigh + 多重散乱: 方位は等間隔、仰角は地平線（俯角 acos(R/r)）を中心に二次で刻む:
     //   仰角 e = e_h ± (π/2 ∓ e_h)·s²（s ∈ (−1, 1) の等間隔の中点）、dω = cos(e)·|de/ds|·ds·dφ
     // [POINT] 空は地平線のすぐ上が最も明るく、その下（地面の手前の大気）で急に暗くなる。仰角を等間隔に
@@ -53,7 +54,7 @@ void CSMain(uint3 thread : SV_GroupThreadID)
         const float azimuth = 2.0 * kPi * (float(i % kGridWidth) + 0.5) / kGridWidth;
         const float3 dir = float3(cos(elevation) * cos(azimuth), sin(elevation), cos(elevation) * sin(azimuth));
         const float solidAngle = cos(elevation) * (range * 2.0 * abs(s) * (2.0 / kGridHeight)) * (2.0 * kPi / kGridWidth);
-        SampleSkyViewLuts(gCameraPosKm, dir, rayleighAndMs, mieNoPhase);
+        SampleSkyViewLuts(gCameraPosKm, dir, rayleighAndMs, mieNoPhase, mie1NoPhase);
         Accumulate(sum, dir, rayleighAndMs * solidAngle);
     }
     // Mie の単散乱: 太陽方向 s を極にした極座標。θ = π·u²（u は等間隔の中点）、dθ = 2π·u·du、
@@ -67,8 +68,14 @@ void CSMain(uint3 thread : SV_GroupThreadID)
         const float theta = kPi * u * u;
         const float solidAngle = sin(theta) * (2.0 * kPi * u / kMieThetaCount) * (2.0 * kPi / kMiePhiCount);
         const float3 dir = cos(theta) * gSunDirection + sin(theta) * (cos(phi) * tangent + sin(phi) * bitangent);
-        SampleSkyViewLuts(gCameraPosKm, dir, rayleighAndMs, mieNoPhase);
-        Accumulate(sum, dir, mieNoPhase * (MiePhase(gAtmosphere, cos(theta)) * solidAngle));
+        SampleSkyViewLuts(gCameraPosKm, dir, rayleighAndMs, mieNoPhase, mie1NoPhase);
+        Accumulate(sum, dir, mieNoPhase * (MiePhase(gAtmosphere, 0, cos(theta)) * solidAngle));
+#if MIE_GENERAL
+        if (gAtmosphere.mieComponentCount > 1) {
+            // Mie の成分 1（design.md §5.9）: 同じ太陽中心の格子で、成分 1 の位相関数を掛ける
+            Accumulate(sum, dir, mie1NoPhase * (MiePhase(gAtmosphere, 1, cos(theta)) * solidAngle));
+        }
+#endif
     }
     [unroll] for (uint k3 = 0; k3 < kShCount; ++k3) {
         gsSum[k3][thread.x] = sum[k3];

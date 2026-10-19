@@ -29,9 +29,21 @@ class Atmosphere:
     ozone_absorption_per_km: np.ndarray     # (3,)
     ozone_center_km: float
     ozone_half_width_km: float
-    # エアロゾルのプリセット（design.md §5.9）: Mie の鉛直分布 exp(−max(h − h_top, 0)/H) と、位相関数の表
+    # エアロゾルのプリセット（design.md §5.9）: Mie の鉛直分布 exp(−max(h − h_top, 0)/H) + a·exp(−h/H_FT) と、
+    # 位相関数の表
     mie_boundary_layer_top_km: float = 0.0
     mie_phase_table: np.ndarray | None = None  # (U, C) θ = π·u²（u 等間隔）。None なら Cornette-Shanks
+    mie_free_trop_density: float = 0.0
+    mie_free_trop_scale_height_km: float = 1.0
+    # 2 つ目の Mie の成分（Phase 4.9。None なら 1 成分）。意味は成分 0 の同名のフィールドと同じ
+    mie1_scattering_per_km: np.ndarray | None = None
+    mie1_extinction_per_km: np.ndarray | None = None
+    mie1_scale_height_km: float = 1.0
+    mie1_boundary_layer_top_km: float = 0.0
+    mie1_free_trop_density: float = 0.0
+    mie1_free_trop_scale_height_km: float = 1.0
+    mie1_phase_g: float = 0.8
+    mie1_phase_table: np.ndarray | None = None
 
     @classmethod
     def from_meta(cls, meta: dict) -> "Atmosphere":
@@ -41,9 +53,27 @@ class Atmosphere:
 
         a = meta["atmosphere"]
         mie_scattering = np.asarray(a["mie_scattering_per_km"], dtype=np.float64)
+        # [POINT] aerosol_preset は g や AOD を変えると " (modified)" が付く。表は元の名前で引く
+        #         （σs・σa はサイドカーの値＝AOD の倍率を掛けた後の値を使うので、表以外は名前を使わない）
+        preset_name = a.get("aerosol_preset_name", a.get("aerosol_preset"))
         table = None
         if a.get("mie_phase_model") == "table":
-            table = load_phase_table(a["coefficient_set"], a["aerosol_preset"])
+            table = load_phase_table(a["coefficient_set"], preset_name)
+        mie1 = {}
+        if int(a.get("mie_component_count", 1)) == 2:
+            m1 = a["mie1"]
+            s1 = np.asarray(m1["scattering_per_km"], dtype=np.float64)
+            mie1 = dict(
+                mie1_scattering_per_km=s1,
+                mie1_extinction_per_km=s1 + np.asarray(m1["absorption_per_km"], dtype=np.float64),
+                mie1_scale_height_km=float(m1["scale_height_km"]),
+                mie1_boundary_layer_top_km=float(m1["boundary_layer_top_km"]),
+                mie1_free_trop_density=float(m1["free_troposphere_density"]),
+                mie1_free_trop_scale_height_km=float(m1["free_troposphere_scale_height_km"]),
+                mie1_phase_g=float(m1["phase_g"]),
+                mie1_phase_table=(load_phase_table(a["coefficient_set"], preset_name, 1)
+                                  if m1["phase_model"] == "table" else None),
+            )
         return cls(
             bottom_radius_km=float(a["bottom_radius_km"]),
             top_radius_km=float(a["top_radius_km"]),
@@ -58,6 +88,9 @@ class Atmosphere:
             ozone_half_width_km=float(a["ozone_half_width_km"]),
             mie_boundary_layer_top_km=float(a.get("mie_boundary_layer_top_km", 0.0)),
             mie_phase_table=table,
+            mie_free_trop_density=float(a.get("mie_free_troposphere_density", 0.0)),
+            mie_free_trop_scale_height_km=float(a.get("mie_free_troposphere_scale_height_km", 1.0)),
+            **mie1,
         )
 
     @classmethod
@@ -84,24 +117,34 @@ class Atmosphere:
         )
 
     # ------------------------------------------------------------------ 媒質
+    @property
+    def has_mie1(self) -> bool:
+        return self.mie1_scattering_per_km is not None
+
     def densities(self, altitude_km: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Rayleigh・Mie（成分 0）・オゾンの密度。成分 1 は mie1_density。"""
+
         h = np.asarray(altitude_km, dtype=np.float64)
         rayleigh = np.exp(-h / self.rayleigh_scale_height_km)
-        if self.mie_boundary_layer_top_km > 0.0:
-            mie = np.exp(-np.maximum(h - self.mie_boundary_layer_top_km, 0.0) / self.mie_scale_height_km)
-        else:
-            mie = np.exp(-h / self.mie_scale_height_km)
+        mie = mie_profile(h, self.mie_boundary_layer_top_km, self.mie_scale_height_km, self.mie_free_trop_density,
+                          self.mie_free_trop_scale_height_km)
         ozone = np.maximum(0.0, 1.0 - np.abs(h - self.ozone_center_km) / self.ozone_half_width_km)
         return rayleigh, mie, ozone
 
-    def mie_phase(self, cos_theta: np.ndarray) -> np.ndarray:
+    def mie1_density(self, altitude_km: np.ndarray) -> np.ndarray:
+        return mie_profile(np.asarray(altitude_km, dtype=np.float64), self.mie1_boundary_layer_top_km,
+                           self.mie1_scale_height_km, self.mie1_free_trop_density, self.mie1_free_trop_scale_height_km)
+
+    def mie_phase(self, cos_theta: np.ndarray, component: int = 0) -> np.ndarray:
         """Mie の位相関数 [sr⁻¹]、形状 (N, C)（Cornette-Shanks なら (N, 1)）。
         表は θ = π·u² で刻んだ点を u = √(θ/π) で線形補間する（GPU の MiePhase と同じ）。"""
 
         cos_theta = np.asarray(cos_theta, dtype=np.float64)
-        if self.mie_phase_table is None:
-            return cornette_shanks_phase(self.mie_phase_g, cos_theta)[:, None]
-        table = np.asarray(self.mie_phase_table, dtype=np.float64)
+        table, g = (self.mie_phase_table, self.mie_phase_g) if component == 0 else (self.mie1_phase_table,
+                                                                                   self.mie1_phase_g)
+        if table is None:
+            return cornette_shanks_phase(g, cos_theta)[:, None]
+        table = np.asarray(table, dtype=np.float64)
         u = np.sqrt(np.arccos(np.clip(cos_theta, -1.0, 1.0)) / np.pi)
         grid = np.linspace(0.0, 1.0, table.shape[0])
         return np.stack([np.interp(u, grid, table[:, c]) for c in range(table.shape[1])], axis=-1)
@@ -110,8 +153,11 @@ class Atmosphere:
         """σt(h) [km⁻¹]、形状 (..., 3)。"""
 
         r, m, o = self.densities(altitude_km)
-        return (r[..., None] * self.rayleigh_scattering_per_km + m[..., None] * self.mie_extinction_per_km
-                + o[..., None] * self.ozone_absorption_per_km)
+        ext = (r[..., None] * self.rayleigh_scattering_per_km + m[..., None] * self.mie_extinction_per_km
+               + o[..., None] * self.ozone_absorption_per_km)
+        if self.has_mie1:
+            ext = ext + self.mie1_density(altitude_km)[..., None] * self.mie1_extinction_per_km
+        return ext
 
     # ------------------------------------------------------------------ 幾何
     def distance_to_top(self, r: np.ndarray, mu: np.ndarray) -> np.ndarray:
@@ -129,6 +175,8 @@ class Atmosphere:
                    self.ozone_center_km + self.ozone_half_width_km]
         if self.mie_boundary_layer_top_km > 0.0:
             heights.append(self.mie_boundary_layer_top_km)  # 境界層の上端で Mie の密度の微分が不連続
+        if self.has_mie1 and self.mie1_boundary_layer_top_km > 0.0:
+            heights.append(self.mie1_boundary_layer_top_km)
         radii = self.bottom_radius_km + np.array(heights)
         disc = (r * mu)[:, None] ** 2 - r[:, None] ** 2 + radii[None, :] ** 2
         s = np.sqrt(np.where(disc >= 0.0, disc, np.nan))
@@ -288,9 +336,17 @@ class Atmosphere:
             phase_m = self.mie_phase(cos_theta)[:, None, :]  # (n, 1, C or 1)
         sigma_r = rayleigh_d[..., None] * self.rayleigh_scattering_per_km
         sigma_m = mie_d[..., None] * self.mie_scattering_per_km
+        source = sigma_r * phase_r[..., None] + sigma_m * phase_m
+        sigma_s = sigma_r + sigma_m
+        if self.has_mie1:
+            # [POINT] 成分ごとに位相関数を掛ける（鉛直分布が違うので混ぜた位相関数にはまとめられない）
+            sigma_m1 = self.mie1_density(r - self.bottom_radius_km)[..., None] * self.mie1_scattering_per_km
+            phase_m1 = phase_m if isotropic else self.mie_phase(cos_theta, 1)[:, None, :]
+            source = source + sigma_m1 * phase_m1
+            sigma_s = sigma_s + sigma_m1
         sun_t = self.sun_transmittance(p.reshape(-1, 3), sun, inner_panels, order).reshape(r.shape + (n_ch,))
-        lum = np.einsum("nm,nmc->nc", w, view_t * (sigma_r * phase_r[..., None] + sigma_m * phase_m) * sun_t)
-        ms1 = np.einsum("nm,nmc->nc", w, view_t * (sigma_r + sigma_m))
+        lum = np.einsum("nm,nmc->nc", w, view_t * source * sun_t)
+        ms1 = np.einsum("nm,nmc->nc", w, view_t * sigma_s)
 
         if ground_albedo is not None and np.any(hit_ground):
             # 地表のランバート反射: ρ/π · T_sun · cos(太陽天頂角)、カメラ → 地表の透過率を掛ける
@@ -366,8 +422,21 @@ def cornette_shanks_phase(g: float, cos_theta: np.ndarray) -> np.ndarray:
     return 3.0 / (8.0 * np.pi) * (1.0 - g2) * (1.0 + cos_theta ** 2) / ((2.0 + g2) * denom * np.sqrt(denom))
 
 
-def load_phase_table(coefficient_set: str, preset: str) -> np.ndarray:
-    """data/atmosphere_coefficients.json のプリセットの位相関数の表（1 成分目）、形状 (U, 3)"""
+def mie_profile(h: np.ndarray, top_km: float, scale_height_km: float, free_trop_density: float,
+                free_trop_scale_height_km: float) -> np.ndarray:
+    """Mie の鉛直分布 exp(−max(h − h_top, 0)/H) + a·exp(−h/H_FT)（GPU の SampleMedium と同じ式）"""
+
+    if top_km > 0.0:
+        rho = np.exp(-np.maximum(h - top_km, 0.0) / scale_height_km)
+    else:
+        rho = np.exp(-h / scale_height_km)
+    if free_trop_density > 0.0:
+        rho = rho + free_trop_density * np.exp(-h / free_trop_scale_height_km)
+    return rho
+
+
+def load_phase_table(coefficient_set: str, preset: str, component: int = 0) -> np.ndarray:
+    """data/atmosphere_coefficients.json のプリセットの位相関数の表（component 番目の成分）、形状 (U, 3)"""
 
     import json
     from pathlib import Path
@@ -376,7 +445,7 @@ def load_phase_table(coefficient_set: str, preset: str) -> np.ndarray:
     coeff = json.loads(path.read_text(encoding="utf-8"))
     s = next(x for x in coeff["sets"] if x["name"] == coefficient_set)
     p = next(x for x in s["aerosol_presets"] if x["name"] == preset)
-    return np.asarray(p["components"][0]["phase"]["values_rgb"], dtype=np.float64)
+    return np.asarray(p["components"][component]["phase"]["values_rgb"], dtype=np.float64)
 
 
 def sun_direction(zenith_deg: float, azimuth_deg: float) -> np.ndarray:

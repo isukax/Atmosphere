@@ -3,7 +3,7 @@
 namespace atmosphere {
 
 PathTracer::PathTracer(gfx::Device& device, const gfx::PipelineLibrary& pipelines)
-    : m_device(device), m_pipelines(pipelines), m_pso(pipelines.createCompute("PathTrace_cs"))
+    : m_device(device), m_pipelines(pipelines), m_pso(pipelines, "PathTrace")
 {
 }
 
@@ -51,7 +51,7 @@ void PathTracer::render(ID3D12GraphicsCommandList* cmd, gfx::UploadRing& upload,
     m_accumulationA.transition(cmd, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     m_accumulationB.transition(cmd, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     cmd->SetComputeRootSignature(m_pipelines.rootSignature());
-    cmd->SetPipelineState(m_pso.Get());
+    cmd->SetPipelineState(m_pso.get(params));
     cmd->SetComputeRootConstantBufferView(gfx::PipelineLibrary::kRootPassConstants, upload.push(c));
     cmd->Dispatch((m_width + 7) / 8, (m_height + 7) / 8, 1);
     ++m_frameIndex;

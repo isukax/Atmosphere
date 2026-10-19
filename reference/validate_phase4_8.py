@@ -67,7 +67,10 @@ GROUND_ALBEDO = 0.3           # アプリの既定（Multi-scattering LUT の地
 
 
 def stem(combo) -> str:
-    return f"{combo[0]}_{combo[1].replace('+', '_')}"
+    """ダンプのファイル名。3 つ目の要素は AOD の上書き（Phase48Tests.cpp の Combo::aod550、design.md §5.10）"""
+
+    name = f"{combo[0]}_{combo[1].replace('+', '_')}"
+    return name + (f"_aod{combo[2]:g}" if len(combo) > 2 else "")
 
 
 def relative_error(gpu: np.ndarray, ref: np.ndarray) -> np.ndarray:
@@ -282,7 +285,7 @@ def check_closeup(out: Path, combo) -> list[dict]:
 
 
 # ---------------------------------------------------------------------- V4b
-def check_v4b(out: Path, pt_dir: Path) -> list[dict]:
+def check_v4b(out: Path, pt_dir: Path, presets=("C", "C_A_B")) -> list[dict]:
     previous = {}
     report = pt_dir / "report.json"
     if report.exists():
@@ -290,7 +293,7 @@ def check_v4b(out: Path, pt_dir: Path) -> list[dict]:
             if r["check"].startswith("V4b-2"):
                 previous[r["check"]] = r["delta_e_itp_sdr_auto"]
     results = []
-    for preset in ("C", "C_A_B"):
+    for preset in presets:
         for scenario in V4B_SCENARIOS:
             lut, meta = read_exr(out / "v4b" / f"{preset}_{scenario}_lut.exr")
             pt_stem = pt_dir / f"{preset}_{scenario}_pt"

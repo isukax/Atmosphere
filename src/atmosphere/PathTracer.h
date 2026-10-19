@@ -36,7 +36,7 @@ public:
 private:
     gfx::Device& m_device;
     const gfx::PipelineLibrary& m_pipelines;
-    ComPtr<ID3D12PipelineState> m_pso;
+    MediumPso m_pso;  // MIE_GENERAL の 2 版（解析式の媒質に合わせて選ぶ。表の媒質はどちらの版でも同じ）
     gfx::Texture m_accumulationA;  // RGBA32F: rgb = 単位照度あたり輝度の和、a = サンプル数
     gfx::Texture m_accumulationB;
     gfx::Buffer m_medium;  // 表の媒質（StructuredBuffer<float>）。空なら解析式

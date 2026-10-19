@@ -6,7 +6,7 @@
     "mie_scattering_per_km": "km^-1 at sea level",
     "mie_absorption_per_km": "km^-1 at sea level",
     "sun_color": "working-space RGB with luminance Y = 1 (multiply by illuminance in lux)",
-    "aerosol_presets": "Mie components (design.md 5.9): scattering/absorption km^-1 where the profile is 1, profile rho(h) = exp(-max(h - boundary_layer_top_km, 0) / scale_height_km), phase sr^-1 (table: theta = pi * u^2)"
+    "aerosol_presets": "Mie components (design.md 5.9): scattering/absorption km^-1 where the profile is 1, profile rho(h) = exp(-max(h - boundary_layer_top_km, 0) / scale_height_km) + free_troposphere_density * exp(-h / free_troposphere_scale_height_km), free_troposphere_aod_fraction = share of the component's AOD in the second term (record only), phase sr^-1 (table: theta = pi * u^2), aod550 = vertical optical depth at 550 nm (the app scales scattering/absorption by AOD / aod550)"
   },
   "conditions": {
     "cmfs": "CIE 1931 2 Degree Standard Observer",
@@ -37,7 +37,15 @@
         "refractive_index": "(1.53+0.003j)"
       },
       "aod550": 0.1,
-      "fine_fraction_of_aod550": 0.7
+      "fine_fraction_of_aod550": 0.7,
+      "d_profiles": {
+        "fine_boundary_layer_top_km": 1.5,
+        "coarse_boundary_layer_top_km": 1.0,
+        "boundary_layer_decay_km": 0.3,
+        "free_troposphere_fraction_of_aod550": 0.15,
+        "free_troposphere_component": "fine",
+        "free_troposphere_scale_height_km": 3.0
+      }
     },
     "spectral_source": "Bruneton 2017 demo.cc (ASTM G-173 ETR, O3 233K), BSD-3"
   },
@@ -102,6 +110,7 @@
       "aerosol_presets": [
         {
           "name": "base",
+          "aod550": 0.005328000077083333,
           "aod_rgb": [
             0.005328000077083333,
             0.005328000077083333,
@@ -122,6 +131,9 @@
               ],
               "boundary_layer_top_km": 0.0,
               "scale_height_km": 1.2,
+              "free_troposphere_density": 0.0,
+              "free_troposphere_scale_height_km": 1.0,
+              "free_troposphere_aod_fraction": 0.0,
               "phase": {
                 "model": "cornette_shanks",
                 "g": 0.8
@@ -131,6 +143,7 @@
         },
         {
           "name": "base+A",
+          "aod550": 0.005328000077083333,
           "aod_rgb": [
             0.005328000077083333,
             0.005328000077083333,
@@ -151,6 +164,9 @@
               ],
               "boundary_layer_top_km": 0.0,
               "scale_height_km": 1.2,
+              "free_troposphere_density": 0.0,
+              "free_troposphere_scale_height_km": 1.0,
+              "free_troposphere_aod_fraction": 0.0,
               "phase": {
                 "model": "table",
                 "parameterization": "theta = pi * u^2, u uniform in [0, 1]",
@@ -2217,6 +2233,7 @@
         },
         {
           "name": "base+B",
+          "aod550": 0.005328000077083333,
           "aod_rgb": [
             0.003962607522146548,
             0.005328000077083333,
@@ -2237,6 +2254,9 @@
               ],
               "boundary_layer_top_km": 0.0,
               "scale_height_km": 1.2,
+              "free_troposphere_density": 0.0,
+              "free_troposphere_scale_height_km": 1.0,
+              "free_troposphere_aod_fraction": 0.0,
               "phase": {
                 "model": "cornette_shanks",
                 "g": 0.8
@@ -2246,6 +2266,7 @@
         },
         {
           "name": "base+A+B",
+          "aod550": 0.005328000077083333,
           "aod_rgb": [
             0.003962607522146548,
             0.005328000077083333,
@@ -2266,6 +2287,9 @@
               ],
               "boundary_layer_top_km": 0.0,
               "scale_height_km": 1.2,
+              "free_troposphere_density": 0.0,
+              "free_troposphere_scale_height_km": 1.0,
+              "free_troposphere_aod_fraction": 0.0,
               "phase": {
                 "model": "table",
                 "parameterization": "theta = pi * u^2, u uniform in [0, 1]",
@@ -4332,6 +4356,7 @@
         },
         {
           "name": "C",
+          "aod550": 0.1,
           "aod_rgb": [
             0.1,
             0.1,
@@ -4352,6 +4377,9 @@
               ],
               "boundary_layer_top_km": 0.0,
               "scale_height_km": 1.2,
+              "free_troposphere_density": 0.0,
+              "free_troposphere_scale_height_km": 1.0,
+              "free_troposphere_aod_fraction": 0.0,
               "phase": {
                 "model": "cornette_shanks",
                 "g": 0.8
@@ -4361,6 +4389,7 @@
         },
         {
           "name": "C+A",
+          "aod550": 0.1,
           "aod_rgb": [
             0.09999999999999999,
             0.09999999999999999,
@@ -4381,6 +4410,9 @@
               ],
               "boundary_layer_top_km": 0.0,
               "scale_height_km": 1.2,
+              "free_troposphere_density": 0.0,
+              "free_troposphere_scale_height_km": 1.0,
+              "free_troposphere_aod_fraction": 0.0,
               "phase": {
                 "model": "table",
                 "parameterization": "theta = pi * u^2, u uniform in [0, 1]",
@@ -6447,6 +6479,7 @@
         },
         {
           "name": "C+B",
+          "aod550": 0.1,
           "aod_rgb": [
             0.07437326322855026,
             0.09999999999999999,
@@ -6467,6 +6500,9 @@
               ],
               "boundary_layer_top_km": 0.0,
               "scale_height_km": 1.2,
+              "free_troposphere_density": 0.0,
+              "free_troposphere_scale_height_km": 1.0,
+              "free_troposphere_aod_fraction": 0.0,
               "phase": {
                 "model": "cornette_shanks",
                 "g": 0.8
@@ -6476,6 +6512,7 @@
         },
         {
           "name": "C+A+B",
+          "aod550": 0.1,
           "aod_rgb": [
             0.07437326322855026,
             0.09999999999999999,
@@ -6496,6 +6533,9 @@
               ],
               "boundary_layer_top_km": 0.0,
               "scale_height_km": 1.2,
+              "free_troposphere_density": 0.0,
+              "free_troposphere_scale_height_km": 1.0,
+              "free_troposphere_aod_fraction": 0.0,
               "phase": {
                 "model": "table",
                 "parameterization": "theta = pi * u^2, u uniform in [0, 1]",
@@ -8562,6 +8602,7 @@
         },
         {
           "name": "C+D",
+          "aod550": 0.1,
           "aod_rgb": [
             0.1,
             0.1,
@@ -8571,17 +8612,20 @@
             {
               "name": "fine",
               "scattering_per_km": [
-                0.03500000014901161,
-                0.03500000014901161,
-                0.03500000014901161
+                0.02749999798834324,
+                0.02749999798834324,
+                0.02749999798834324
               ],
               "absorption_per_km": [
-                0.0038888887502253056,
-                0.0038888887502253056,
-                0.0038888887502253056
+                0.0030555555131286383,
+                0.0030555555131286383,
+                0.0030555555131286383
               ],
               "boundary_layer_top_km": 1.5,
               "scale_height_km": 0.3,
+              "free_troposphere_density": 0.16363637149333954,
+              "free_troposphere_scale_height_km": 3.0,
+              "free_troposphere_aod_fraction": 0.2142857162639327,
               "phase": {
                 "model": "cornette_shanks",
                 "g": 0.8
@@ -8601,6 +8645,9 @@
               ],
               "boundary_layer_top_km": 1.0,
               "scale_height_km": 0.3,
+              "free_troposphere_density": 0.0,
+              "free_troposphere_scale_height_km": 1.0,
+              "free_troposphere_aod_fraction": 0.0,
               "phase": {
                 "model": "cornette_shanks",
                 "g": 0.8
@@ -8610,26 +8657,30 @@
         },
         {
           "name": "C+A+B+D",
+          "aod550": 0.1,
           "aod_rgb": [
-            0.07437326322855027,
+            0.07437326322855026,
             0.1,
-            0.1364560077428692
+            0.13645600774286917
           ],
           "components": [
             {
               "name": "fine",
               "scattering_per_km": [
-                0.023236311972141266,
-                0.03756837546825409,
-                0.05776381865143776
+                0.018257101997733116,
+                0.0295180082321167,
+                0.04538585618138313
               ],
               "absorption_per_km": [
-                0.0009811314521357417,
-                0.001320512848906219,
-                0.0017814981983974576
+                0.0007708889897912741,
+                0.0010375457350164652,
+                0.0013997484929859638
               ],
               "boundary_layer_top_km": 1.5,
               "scale_height_km": 0.3,
+              "free_troposphere_density": 0.16363637149333954,
+              "free_troposphere_scale_height_km": 3.0,
+              "free_troposphere_aod_fraction": 0.2142857162639327,
               "phase": {
                 "model": "table",
                 "parameterization": "theta = pi * u^2, u uniform in [0, 1]",
@@ -10706,6 +10757,9 @@
               ],
               "boundary_layer_top_km": 1.0,
               "scale_height_km": 0.3,
+              "free_troposphere_density": 0.0,
+              "free_troposphere_scale_height_km": 1.0,
+              "free_troposphere_aod_fraction": 0.0,
               "phase": {
                 "model": "table",
                 "parameterization": "theta = pi * u^2, u uniform in [0, 1]",
@@ -12860,6 +12914,7 @@
       "aerosol_presets": [
         {
           "name": "base",
+          "aod550": 0.005328000077083333,
           "aod_rgb": [
             0.005328000077083333,
             0.005328000077083333,
@@ -12880,6 +12935,9 @@
               ],
               "boundary_layer_top_km": 0.0,
               "scale_height_km": 1.2,
+              "free_troposphere_density": 0.0,
+              "free_troposphere_scale_height_km": 1.0,
+              "free_troposphere_aod_fraction": 0.0,
               "phase": {
                 "model": "cornette_shanks",
                 "g": 0.8
@@ -12889,6 +12947,7 @@
         },
         {
           "name": "base+A",
+          "aod550": 0.005328000077083333,
           "aod_rgb": [
             0.005328000077083333,
             0.005328000077083333,
@@ -12909,6 +12968,9 @@
               ],
               "boundary_layer_top_km": 0.0,
               "scale_height_km": 1.2,
+              "free_troposphere_density": 0.0,
+              "free_troposphere_scale_height_km": 1.0,
+              "free_troposphere_aod_fraction": 0.0,
               "phase": {
                 "model": "table",
                 "parameterization": "theta = pi * u^2, u uniform in [0, 1]",
@@ -14975,6 +15037,7 @@
         },
         {
           "name": "base+B",
+          "aod550": 0.005328000077083333,
           "aod_rgb": [
             0.004352648709419655,
             0.005431492407715513,
@@ -14995,6 +15058,9 @@
               ],
               "boundary_layer_top_km": 0.0,
               "scale_height_km": 1.2,
+              "free_troposphere_density": 0.0,
+              "free_troposphere_scale_height_km": 1.0,
+              "free_troposphere_aod_fraction": 0.0,
               "phase": {
                 "model": "cornette_shanks",
                 "g": 0.8
@@ -15004,6 +15070,7 @@
         },
         {
           "name": "base+A+B",
+          "aod550": 0.005328000077083333,
           "aod_rgb": [
             0.004352648709419655,
             0.005431492407715513,
@@ -15024,6 +15091,9 @@
               ],
               "boundary_layer_top_km": 0.0,
               "scale_height_km": 1.2,
+              "free_troposphere_density": 0.0,
+              "free_troposphere_scale_height_km": 1.0,
+              "free_troposphere_aod_fraction": 0.0,
               "phase": {
                 "model": "table",
                 "parameterization": "theta = pi * u^2, u uniform in [0, 1]",
@@ -17090,6 +17160,7 @@
         },
         {
           "name": "C",
+          "aod550": 0.1,
           "aod_rgb": [
             0.1,
             0.1,
@@ -17110,6 +17181,9 @@
               ],
               "boundary_layer_top_km": 0.0,
               "scale_height_km": 1.2,
+              "free_troposphere_density": 0.0,
+              "free_troposphere_scale_height_km": 1.0,
+              "free_troposphere_aod_fraction": 0.0,
               "phase": {
                 "model": "cornette_shanks",
                 "g": 0.8
@@ -17119,6 +17193,7 @@
         },
         {
           "name": "C+A",
+          "aod550": 0.1,
           "aod_rgb": [
             0.09999999999999999,
             0.09999999999999999,
@@ -17139,6 +17214,9 @@
               ],
               "boundary_layer_top_km": 0.0,
               "scale_height_km": 1.2,
+              "free_troposphere_density": 0.0,
+              "free_troposphere_scale_height_km": 1.0,
+              "free_troposphere_aod_fraction": 0.0,
               "phase": {
                 "model": "table",
                 "parameterization": "theta = pi * u^2, u uniform in [0, 1]",
@@ -19205,6 +19283,7 @@
         },
         {
           "name": "C+B",
+          "aod550": 0.1,
           "aod_rgb": [
             0.08169385597686389,
             0.10194242359487414,
@@ -19225,6 +19304,9 @@
               ],
               "boundary_layer_top_km": 0.0,
               "scale_height_km": 1.2,
+              "free_troposphere_density": 0.0,
+              "free_troposphere_scale_height_km": 1.0,
+              "free_troposphere_aod_fraction": 0.0,
               "phase": {
                 "model": "cornette_shanks",
                 "g": 0.8
@@ -19234,6 +19316,7 @@
         },
         {
           "name": "C+A+B",
+          "aod550": 0.1,
           "aod_rgb": [
             0.08169385597686389,
             0.10194242359487414,
@@ -19254,6 +19337,9 @@
               ],
               "boundary_layer_top_km": 0.0,
               "scale_height_km": 1.2,
+              "free_troposphere_density": 0.0,
+              "free_troposphere_scale_height_km": 1.0,
+              "free_troposphere_aod_fraction": 0.0,
               "phase": {
                 "model": "table",
                 "parameterization": "theta = pi * u^2, u uniform in [0, 1]",
@@ -21320,6 +21406,7 @@
         },
         {
           "name": "C+D",
+          "aod550": 0.1,
           "aod_rgb": [
             0.1,
             0.1,
@@ -21329,17 +21416,20 @@
             {
               "name": "fine",
               "scattering_per_km": [
-                0.03500000014901161,
-                0.03500000014901161,
-                0.03500000014901161
+                0.02749999798834324,
+                0.02749999798834324,
+                0.02749999798834324
               ],
               "absorption_per_km": [
-                0.0038888887502253056,
-                0.0038888887502253056,
-                0.0038888887502253056
+                0.0030555555131286383,
+                0.0030555555131286383,
+                0.0030555555131286383
               ],
               "boundary_layer_top_km": 1.5,
               "scale_height_km": 0.3,
+              "free_troposphere_density": 0.16363637149333954,
+              "free_troposphere_scale_height_km": 3.0,
+              "free_troposphere_aod_fraction": 0.2142857162639327,
               "phase": {
                 "model": "cornette_shanks",
                 "g": 0.8
@@ -21359,6 +21449,9 @@
               ],
               "boundary_layer_top_km": 1.0,
               "scale_height_km": 0.3,
+              "free_troposphere_density": 0.0,
+              "free_troposphere_scale_height_km": 1.0,
+              "free_troposphere_aod_fraction": 0.0,
               "phase": {
                 "model": "cornette_shanks",
                 "g": 0.8
@@ -21368,6 +21461,7 @@
         },
         {
           "name": "C+A+B+D",
+          "aod550": 0.1,
           "aod_rgb": [
             0.08169385597686388,
             0.10194242359487414,
@@ -21377,17 +21471,20 @@
             {
               "name": "fine",
               "scattering_per_km": [
-                0.02744167111814022,
-                0.03869811072945595,
-                0.06057656928896904
+                0.021561311557888985,
+                0.03040565922856331,
+                0.047595877200365067
               ],
               "absorption_per_km": [
-                0.0010261074639856815,
-                0.0013391503598541021,
-                0.0018923644674941897
+                0.0008062272681854665,
+                0.0010521895019337535,
+                0.0014868577709421515
               ],
               "boundary_layer_top_km": 1.5,
               "scale_height_km": 0.3,
+              "free_troposphere_density": 0.16363637149333954,
+              "free_troposphere_scale_height_km": 3.0,
+              "free_troposphere_aod_fraction": 0.2142857162639327,
               "phase": {
                 "model": "table",
                 "parameterization": "theta = pi * u^2, u uniform in [0, 1]",
@@ -23464,6 +23561,9 @@
               ],
               "boundary_layer_top_km": 1.0,
               "scale_height_km": 0.3,
+              "free_troposphere_density": 0.0,
+              "free_troposphere_scale_height_km": 1.0,
+              "free_troposphere_aod_fraction": 0.0,
               "phase": {
                 "model": "table",
                 "parameterization": "theta = pi * u^2, u uniform in [0, 1]",
@@ -25618,6 +25718,7 @@
       "aerosol_presets": [
         {
           "name": "base",
+          "aod550": 0.005328000077083333,
           "aod_rgb": [
             0.005328000077083333,
             0.005328000077083333,
@@ -25638,6 +25739,9 @@
               ],
               "boundary_layer_top_km": 0.0,
               "scale_height_km": 1.2,
+              "free_troposphere_density": 0.0,
+              "free_troposphere_scale_height_km": 1.0,
+              "free_troposphere_aod_fraction": 0.0,
               "phase": {
                 "model": "cornette_shanks",
                 "g": 0.8
@@ -25647,6 +25751,7 @@
         },
         {
           "name": "base+A",
+          "aod550": 0.005328000077083333,
           "aod_rgb": [
             0.005328000077083333,
             0.005328000077083333,
@@ -25667,6 +25772,9 @@
               ],
               "boundary_layer_top_km": 0.0,
               "scale_height_km": 1.2,
+              "free_troposphere_density": 0.0,
+              "free_troposphere_scale_height_km": 1.0,
+              "free_troposphere_aod_fraction": 0.0,
               "phase": {
                 "model": "table",
                 "parameterization": "theta = pi * u^2, u uniform in [0, 1]",
@@ -27733,6 +27841,7 @@
         },
         {
           "name": "base+B",
+          "aod550": 0.005328000077083333,
           "aod_rgb": [
             0.004660991023208283,
             0.005320325444926867,
@@ -27753,6 +27862,9 @@
               ],
               "boundary_layer_top_km": 0.0,
               "scale_height_km": 1.2,
+              "free_troposphere_density": 0.0,
+              "free_troposphere_scale_height_km": 1.0,
+              "free_troposphere_aod_fraction": 0.0,
               "phase": {
                 "model": "cornette_shanks",
                 "g": 0.8
@@ -27762,6 +27874,7 @@
         },
         {
           "name": "base+A+B",
+          "aod550": 0.005328000077083333,
           "aod_rgb": [
             0.004660991023208283,
             0.005320325444926867,
@@ -27782,6 +27895,9 @@
               ],
               "boundary_layer_top_km": 0.0,
               "scale_height_km": 1.2,
+              "free_troposphere_density": 0.0,
+              "free_troposphere_scale_height_km": 1.0,
+              "free_troposphere_aod_fraction": 0.0,
               "phase": {
                 "model": "table",
                 "parameterization": "theta = pi * u^2, u uniform in [0, 1]",
@@ -29848,6 +29964,7 @@
         },
         {
           "name": "C",
+          "aod550": 0.1,
           "aod_rgb": [
             0.1,
             0.1,
@@ -29868,6 +29985,9 @@
               ],
               "boundary_layer_top_km": 0.0,
               "scale_height_km": 1.2,
+              "free_troposphere_density": 0.0,
+              "free_troposphere_scale_height_km": 1.0,
+              "free_troposphere_aod_fraction": 0.0,
               "phase": {
                 "model": "cornette_shanks",
                 "g": 0.8
@@ -29877,6 +29997,7 @@
         },
         {
           "name": "C+A",
+          "aod550": 0.1,
           "aod_rgb": [
             0.09999999999999999,
             0.09999999999999999,
@@ -29897,6 +30018,9 @@
               ],
               "boundary_layer_top_km": 0.0,
               "scale_height_km": 1.2,
+              "free_troposphere_density": 0.0,
+              "free_troposphere_scale_height_km": 1.0,
+              "free_troposphere_aod_fraction": 0.0,
               "phase": {
                 "model": "table",
                 "parameterization": "theta = pi * u^2, u uniform in [0, 1]",
@@ -31963,6 +32087,7 @@
         },
         {
           "name": "C+B",
+          "aod550": 0.1,
           "aod_rgb": [
             0.08748106148226287,
             0.09985595660575389,
@@ -31983,6 +32108,9 @@
               ],
               "boundary_layer_top_km": 0.0,
               "scale_height_km": 1.2,
+              "free_troposphere_density": 0.0,
+              "free_troposphere_scale_height_km": 1.0,
+              "free_troposphere_aod_fraction": 0.0,
               "phase": {
                 "model": "cornette_shanks",
                 "g": 0.8
@@ -31992,6 +32120,7 @@
         },
         {
           "name": "C+A+B",
+          "aod550": 0.1,
           "aod_rgb": [
             0.08748106148226287,
             0.09985595660575389,
@@ -32012,6 +32141,9 @@
               ],
               "boundary_layer_top_km": 0.0,
               "scale_height_km": 1.2,
+              "free_troposphere_density": 0.0,
+              "free_troposphere_scale_height_km": 1.0,
+              "free_troposphere_aod_fraction": 0.0,
               "phase": {
                 "model": "table",
                 "parameterization": "theta = pi * u^2, u uniform in [0, 1]",
@@ -34078,6 +34210,7 @@
         },
         {
           "name": "C+D",
+          "aod550": 0.1,
           "aod_rgb": [
             0.1,
             0.1,
@@ -34087,17 +34220,20 @@
             {
               "name": "fine",
               "scattering_per_km": [
-                0.03500000014901161,
-                0.03500000014901161,
-                0.03500000014901161
+                0.02749999798834324,
+                0.02749999798834324,
+                0.02749999798834324
               ],
               "absorption_per_km": [
-                0.0038888887502253056,
-                0.0038888887502253056,
-                0.0038888887502253056
+                0.0030555555131286383,
+                0.0030555555131286383,
+                0.0030555555131286383
               ],
               "boundary_layer_top_km": 1.5,
               "scale_height_km": 0.3,
+              "free_troposphere_density": 0.16363637149333954,
+              "free_troposphere_scale_height_km": 3.0,
+              "free_troposphere_aod_fraction": 0.2142857162639327,
               "phase": {
                 "model": "cornette_shanks",
                 "g": 0.8
@@ -34117,6 +34253,9 @@
               ],
               "boundary_layer_top_km": 1.0,
               "scale_height_km": 0.3,
+              "free_troposphere_density": 0.0,
+              "free_troposphere_scale_height_km": 1.0,
+              "free_troposphere_aod_fraction": 0.0,
               "phase": {
                 "model": "cornette_shanks",
                 "g": 0.8
@@ -34126,26 +34265,30 @@
         },
         {
           "name": "C+A+B+D",
+          "aod550": 0.1,
           "aod_rgb": [
             0.08748106148226287,
-            0.09985595660575389,
+            0.09985595660575387,
             0.13064584924360334
           ],
           "components": [
             {
               "name": "fine",
               "scattering_per_km": [
-                0.030671576038002968,
-                0.03755182772874832,
-                0.05458052083849907
+                0.024099094793200493,
+                0.029505006968975067,
+                0.042884696274995804
               ],
               "absorption_per_km": [
-                0.001136424602009356,
-                0.001305707381106913,
-                0.0017070602625608444
+                0.0008929050527513027,
+                0.0010259129339829087,
+                0.0013412615517154336
               ],
               "boundary_layer_top_km": 1.5,
               "scale_height_km": 0.3,
+              "free_troposphere_density": 0.16363637149333954,
+              "free_troposphere_scale_height_km": 3.0,
+              "free_troposphere_aod_fraction": 0.2142857162639327,
               "phase": {
                 "model": "table",
                 "parameterization": "theta = pi * u^2, u uniform in [0, 1]",
@@ -36222,6 +36365,9 @@
               ],
               "boundary_layer_top_km": 1.0,
               "scale_height_km": 0.3,
+              "free_troposphere_density": 0.0,
+              "free_troposphere_scale_height_km": 1.0,
+              "free_troposphere_aod_fraction": 0.0,
               "phase": {
                 "model": "table",
                 "parameterization": "theta = pi * u^2, u uniform in [0, 1]",

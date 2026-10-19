@@ -10,8 +10,27 @@
 #include <glm/mat4x4.hpp>
 
 #include <optional>
+#include <string>
 
 namespace atmosphere {
+
+/// 媒質を扱うパスの、シェーダーの 2 つの版（MIE_GENERAL = 0 / 1、CMakeLists.txt・AtmosphereCommon.hlsli）。
+/// [POINT] 1 成分・背景なしのプリセットで成分 1 の分岐を残すと GPU 時間が 10〜30% 増えたので、版を分けて
+///         媒質に合わせて選ぶ（usesGeneralMieMedium）。どちらの版でも結果は同じ（0 の版が扱える媒質では）
+struct MediumPso {
+    MediumPso(const gfx::PipelineLibrary& pipelines, const std::string& pass)
+        : basic(pipelines.createCompute((pass + "_cs").c_str())),
+          general(pipelines.createCompute((pass + "_mie_cs").c_str()))
+    {
+    }
+    ID3D12PipelineState* get(const AtmosphereParams& params) const
+    {
+        return usesGeneralMieMedium(params) ? general.Get() : basic.Get();
+    }
+
+    ComPtr<ID3D12PipelineState> basic;    // 1 成分・背景なし（Phase 4.8 と同じコード）
+    ComPtr<ID3D12PipelineState> general;  // 2 成分・自由大気の背景
+};
 
 /// 太陽方向の透過率の求め方（AtmosphereIntegrate.hlsli の SUN_TRANSMITTANCE_* と一致させる）。
 enum class SunTransmittanceMode : uint32_t {
@@ -142,8 +161,11 @@ public:
     gfx::Texture& skyViewLut() { return m_skyViewLut; }
     /// Sky-View LUT の 2 枚目: Mie の単散乱から位相関数を除いた積分（描画時に p_M(θ) を掛ける）
     gfx::Texture& skyViewMieLut() { return m_skyViewMieLut; }
+    /// Sky-View LUT の 3 枚目: Mie の成分 1（2 成分のプリセットだけ。design.md §5.9）
+    gfx::Texture& skyViewMie1Lut() { return m_skyViewMie1Lut; }
     gfx::Texture& aerialPerspective() { return m_aerialPerspective; }
     gfx::Texture& aerialPerspectiveMie() { return m_aerialPerspectiveMie; }
+    gfx::Texture& aerialPerspectiveMie1() { return m_aerialPerspectiveMie1; }
     gfx::Texture& aerialPerspectiveMultiple() { return m_aerialPerspectiveMs; }
     gfx::Texture& aerialPerspectiveTransmittance() { return m_aerialPerspectiveT; }
     /// 空からの照度の SH 係数（9 × float4、単位照度あたり、余弦の畳み込み済み）
@@ -154,19 +176,21 @@ private:
                          const SkyPassConstants& constants, uint32_t width, uint32_t height);
 
     const gfx::PipelineLibrary& m_pipelines;
-    ComPtr<ID3D12PipelineState> m_transmittancePso;
-    ComPtr<ID3D12PipelineState> m_multiScatteringPso;
-    ComPtr<ID3D12PipelineState> m_skyViewPso;
-    ComPtr<ID3D12PipelineState> m_skyFromLutPso;
-    ComPtr<ID3D12PipelineState> m_raymarchPso;
-    ComPtr<ID3D12PipelineState> m_aerialPerspectivePso;
-    ComPtr<ID3D12PipelineState> m_skyIrradiancePso;
+    MediumPso m_transmittancePso;
+    MediumPso m_multiScatteringPso;
+    MediumPso m_skyViewPso;
+    MediumPso m_skyFromLutPso;
+    MediumPso m_raymarchPso;
+    MediumPso m_aerialPerspectivePso;
+    MediumPso m_skyIrradiancePso;
     gfx::Texture m_transmittanceLut;
     gfx::Texture m_multiScatteringLut;
     gfx::Texture m_skyViewLut;     // Rayleigh の単散乱 + 多重散乱 [sr⁻¹]
     gfx::Texture m_skyViewMieLut;  // Mie の単散乱（位相関数なし）[無次元]
+    gfx::Texture m_skyViewMie1Lut; // Mie の成分 1 の同じ量（2 成分のプリセットだけ書く。design.md §5.9）
     gfx::Texture m_aerialPerspective;     // 3D: Rayleigh の単散乱の内散乱 [sr⁻¹]、A = 平均透過率
     gfx::Texture m_aerialPerspectiveMie;  // 3D: Mie の単散乱（位相関数なし）[無次元]
+    gfx::Texture m_aerialPerspectiveMie1; // 3D: Mie の成分 1 の同じ量（2 成分のプリセットだけ書く）
     gfx::Texture m_aerialPerspectiveMs;   // 3D: 多重散乱の内散乱 [sr⁻¹]（影の対象外。design.md §5.6）
     gfx::Texture m_aerialPerspectiveT;    // 3D: 透過率（RGB）[無次元]（design.md §5.7 の方式 2）
     gfx::Buffer m_skyIrradiance;          // SH 係数 9 × float4

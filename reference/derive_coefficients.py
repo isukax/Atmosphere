@@ -135,7 +135,9 @@ def channel_mode_optics(spec: am.SpectralModeOptics, wl: np.ndarray, weights: np
 
 def aerosol_presets(rayleigh: np.ndarray, ozone: np.ndarray, fine: am.ModeOptics, coarse: am.ModeOptics) -> list[dict]:
     variants = am.build_variants(rayleigh, ozone, fine, coarse)
-    return [{"name": name, "aod_rgb": [float(x) for x in variants[name].aod()],
+    # [POINT] aod550 はアプリが AOD を変えるときの基準（σs・σa に AOD / aod550 を掛ける、design.md §5.10）。
+    #         分光フィットのセットでは G チャンネルの値は 550 nm の値と違うので、aod_rgb から求めず別に持つ
+    return [{"name": name, "aod550": am.preset_aod550(name), "aod_rgb": [float(x) for x in variants[name].aod()],
              "components": [am.component_to_json(c) for c in variants[name].mie]} for name in am.PRESET_NAMES]
 
 
@@ -255,8 +257,11 @@ def main() -> None:
             "mie_absorption_per_km": "km^-1 at sea level",
             "sun_color": "working-space RGB with luminance Y = 1 (multiply by illuminance in lux)",
             "aerosol_presets": "Mie components (design.md 5.9): scattering/absorption km^-1 where the profile is 1, "
-                               "profile rho(h) = exp(-max(h - boundary_layer_top_km, 0) / scale_height_km), "
-                               "phase sr^-1 (table: theta = pi * u^2)",
+                               "profile rho(h) = exp(-max(h - boundary_layer_top_km, 0) / scale_height_km) "
+                               "+ free_troposphere_density * exp(-h / free_troposphere_scale_height_km), "
+                               "free_troposphere_aod_fraction = share of the component's AOD in the second term "
+                               "(record only), phase sr^-1 (table: theta = pi * u^2), aod550 = vertical optical "
+                               "depth at 550 nm (the app scales scattering/absorption by AOD / aod550)",
         },
         "conditions": {
             "cmfs": "CIE 1931 2 Degree Standard Observer",
@@ -272,6 +277,12 @@ def main() -> None:
                 "coarse": {"volume_median_radius_um": am.COARSE.volume_median_radius_um,
                            "sigma_ln": am.COARSE.sigma_ln, "refractive_index": str(am.COARSE.refractive_index)},
                 "aod550": am.AOD550_REALISTIC, "fine_fraction_of_aod550": am.FINE_FRACTION_OF_AOD,
+                "d_profiles": {"fine_boundary_layer_top_km": am.FINE_LAYER_TOP_KM,
+                               "coarse_boundary_layer_top_km": am.COARSE_LAYER_TOP_KM,
+                               "boundary_layer_decay_km": am.LAYER_DECAY_KM,
+                               "free_troposphere_fraction_of_aod550": am.FREE_TROP_FRACTION_OF_AOD,
+                               "free_troposphere_component": "fine",
+                               "free_troposphere_scale_height_km": am.FREE_TROP_SCALE_HEIGHT_KM},
             },
             "spectral_source": "Bruneton 2017 demo.cc (ASTM G-173 ETR, O3 233K), BSD-3",
         },

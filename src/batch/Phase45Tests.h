@@ -1,5 +1,6 @@
 #pragma once
 
+#include "atmosphere/AtmosphereParams.h"
 #include "gfx/Pipeline.h"
 
 #include <filesystem>
@@ -15,5 +16,9 @@ namespace batch {
 ///   "shadow_ap_methods"         … V3g: 空気遠近法の影の方式（§5.6 の 0 / 1 / 5）と、基準のレイマーチ（影あり / なし）
 int runPhase45Test(gfx::Device& device, const gfx::PipelineLibrary& pipelines, std::string_view name,
                    const std::filesystem::path& outDir);
+
+/// V3g を、与えた大気（エアロゾルのプリセットを適用したもの。Phase 4.9）で描く。出力は "shadow_ap_methods" と同じ
+int runShadowApMethodsWithAtmosphere(gfx::Device& device, const gfx::PipelineLibrary& pipelines,
+                                     const std::filesystem::path& outDir, const atmosphere::AtmosphereParams& params);
 
 } // namespace batch

@@ -4,6 +4,7 @@
 //   gAerialPerspectiveUav    : RGB = Rayleigh の単散乱の内散乱 [sr⁻¹]、A = 透過率の RGB 平均
 //   gAerialPerspectiveMieUav : RGB = Mie の単散乱から位相関数を除いた内散乱 [無次元]、
 //                              A = 視線上の点で太陽が見える割合の平均（地形の影の検証用。合成では使わない）
+//   gAerialPerspectiveMie1Uav: RGB = Mie の成分 1 の同じ量（2 成分のプリセットだけ。design.md §5.9）。A は 1
 //   gAerialPerspectiveMsUav  : RGB = 多重散乱の内散乱 [sr⁻¹]（影の対象外）
 //   gAerialPerspectiveTransmittanceUav : RGB = 透過率（design.md §5.7 の方式 2。A は 1）
 // 地形の色には、合成パス（SkyFromLut）で color × T + 内散乱 として掛ける。
@@ -79,6 +80,12 @@ void CSMain(uint3 id : SV_DispatchThreadID)
     output[id] = float4(result.luminance - result.multipleScattering, dot(result.transmittance, 1.0 / 3.0));
     mieOutput[id] = float4(result.mieSingleNoPhase, result.opaqueShadowMean);
     msOutput[id] = float4(result.multipleScattering, 1.0);
+#if MIE_GENERAL
+    if (gAtmosphere.mieComponentCount > 1) {
+        RWTexture3D<float4> mie1Output = ResourceDescriptorHeap[gAerialPerspectiveMie1Uav];
+        mie1Output[id] = float4(result.mie1SingleNoPhase, 1.0);
+    }
+#endif
     RWTexture3D<float4> transmittanceOutput = ResourceDescriptorHeap[gAerialPerspectiveTransmittanceUav];
     transmittanceOutput[id] = float4(result.transmittance, 1.0);
 }

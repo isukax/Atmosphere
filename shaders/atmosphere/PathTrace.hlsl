@@ -199,7 +199,8 @@ TableMediumSample SampleTableMedium(StructuredBuffer<float> m, float altitudeKm,
 }
 
 // チャンネル c の最大消散係数 σ̄ [km⁻¹]: 各成分の密度の最大値 × 係数の和が上限になる
-// （解析式の媒質は密度が 1 以下、表の媒質は分布の最大値を表に持つ）
+// （解析式の媒質は Rayleigh・オゾンが 1 以下、Mie の成分 k が 1 + a_k 以下（地表、自由大気の背景の分。design.md §5.9）。
+//  表の媒質は分布の最大値を表に持つ）
 float MajorantPerKm(uint c)
 {
     if (UseTableMedium()) {
@@ -212,8 +213,16 @@ float MajorantPerKm(uint c)
         }
         return majorant;
     }
-    return gAtmosphere.rayleighScatteringPerKm[c] + gAtmosphere.mieExtinctionPerKm[c] +
-           gAtmosphere.ozoneAbsorptionPerKm[c];
+    // [POINT] 背景も成分 1 もないとき（Phase 4.8 までの媒質）は、前と同じ式（パストレースの回帰を画素で比べるため）
+    float majorant = gAtmosphere.rayleighScatteringPerKm[c] + gAtmosphere.mieExtinctionPerKm[c] +
+                     gAtmosphere.ozoneAbsorptionPerKm[c];
+#if MIE_GENERAL
+    majorant += gAtmosphere.mieFreeTropDensity * gAtmosphere.mieExtinctionPerKm[c];
+    if (gAtmosphere.mieComponentCount > 1) {
+        majorant += (1.0 + gAtmosphere.mie1FreeTropDensity) * gAtmosphere.mie1ExtinctionPerKm[c];
+    }
+#endif
+    return majorant;
 }
 
 // 点 x のチャンネル c の消散係数（解析式 / 表の媒質）
@@ -251,7 +260,7 @@ float SunTransmittanceRatioTracking(float3 p, uint c, float majorant, inout Rng 
     return transmittance;
 }
 
-// チャンネル c の 1 本の経路。単位照度あたりの輝度 [sr⁻¹] の推定値を返す。
+// チャンネル c の 1 本の経路。単位照度あたりの輝度 [sr⁻¹] の推定値を返す（Mie が 1 成分の解析式の媒質）。
 float TraceChannel(uint c, float3 origin, float3 dir, inout Rng rng)
 {
     const float majorant = MajorantPerKm(c);
@@ -327,7 +336,7 @@ float TraceChannel(uint c, float3 origin, float3 dir, inout Rng rng)
         // 太陽への NEE: 位相関数は Rayleigh と Mie を σs の比で混ぜたもの
         const float cosSun = dot(d, gSunDirection);
         const float phaseSun = (scatteringR * RayleighPhase(cosSun) +
-                                scatteringM * MiePhase(gAtmosphere, cosSun)[c]) / scattering;
+                                scatteringM * MiePhase(gAtmosphere, 0, cosSun)[c]) / scattering;
         luminance += throughput * phaseSun * SunTransmittanceRatioTracking(p, c, majorant, rng);
 
         // 次の方向: 混合分布 pdf = w_R/(4π) + w_M·p_HG、重み = 位相関数 / pdf（どちらの比も有界）
@@ -335,9 +344,109 @@ float TraceChannel(uint c, float3 origin, float3 dir, inout Rng rng)
         const float3 newDir = NextFloat(rng) < weightR ? SampleUniformSphere(rng) : SampleHenyeyGreenstein(rng, d, g);
         const float cosNew = dot(newDir, d);
         const float pdf = weightR * kIsotropicPhase + (1.0 - weightR) * HenyeyGreensteinPhase(g, cosNew);
-        const float phase = (scatteringR * RayleighPhase(cosNew) + scatteringM * MiePhase(gAtmosphere, cosNew)[c]) /
+        const float phase = (scatteringR * RayleighPhase(cosNew) + scatteringM * MiePhase(gAtmosphere, 0, cosNew)[c]) /
                             scattering;
         throughput *= phase / pdf;
+        d = newDir;
+    }
+    return luminance;
+}
+
+// Mie が 2 成分の解析式の媒質（design.md §5.9）でのチャンネル c の 1 本の経路。TraceChannel と同じ手順で、散乱・NEE・
+// 方向のサンプリングを成分ごとに混ぜたもの（表の媒質の TraceChannelTable と同じ作り）。
+// [POINT] 1 成分の TraceChannel は Phase 4.8 までと同じコードのまま残す（式の形を変えるとコンパイラの演算の並びが
+//         変わり、パストレースの回帰が画素で一致しなくなった）
+float TraceChannelTwoMie(uint c, float3 origin, float3 dir, inout Rng rng)
+{
+    const float majorant = MajorantPerKm(c);
+    const float g0 = gAtmosphere.miePhaseG;
+    const float g1 = gAtmosphere.mie1PhaseG;
+    float throughput = 1.0;
+    float luminance = 0.0;
+    float3 p = origin;
+    float3 d = dir;
+    for (uint depth = 0; depth < gMaxDepth; ++depth) {
+        float tTop0;
+        float tTop1;
+        if (!RaySphere(p, d, gAtmosphere.topRadiusKm, tTop0, tTop1) || tTop1 <= 0.0) {
+            break;
+        }
+        float tMax = tTop1;
+        bool hitGround = false;
+        float tGround0;
+        float tGround1;
+        if (RaySphere(p, d, gAtmosphere.bottomRadiusKm, tGround0, tGround1) && tGround0 > 0.0 && tGround0 < tMax) {
+            tMax = tGround0;
+            hitGround = true;
+        }
+
+        // デルタトラッキング
+        float t = 0.0;
+        bool collided = false;
+        MediumSample m = (MediumSample)0;
+        for (uint k = 0; k < 65536; ++k) {
+            t += SampleFreeFlight(rng, majorant);
+            if (t >= tMax) {
+                break;
+            }
+            m = SampleMedium(gAtmosphere, length(p + t * d) - gAtmosphere.bottomRadiusKm);
+            if (NextFloat(rng) * majorant < m.extinction[c]) {
+                collided = true;
+                break;
+            }
+        }
+
+        if (!collided) {
+            if (!hitGround) {
+                break;
+            }
+            const float albedo = gAtmosphere.groundAlbedo[c];
+            if (albedo <= 0.0) {
+                break;
+            }
+            const float3 n = normalize(p + tMax * d);
+            p = n * (gAtmosphere.bottomRadiusKm + kSurfaceOffsetKm);
+            const float cosSun = dot(n, gSunDirection);
+            if (cosSun > 0.0) {
+                luminance += throughput * albedo / kPi * cosSun * SunTransmittanceRatioTracking(p, c, majorant, rng);
+            }
+            throughput *= albedo;
+            d = SampleCosineHemisphere(rng, n);
+            continue;
+        }
+
+        p += t * d;
+        const float minRadius = gAtmosphere.bottomRadiusKm + kSurfaceOffsetKm;
+        if (dot(p, p) < minRadius * minRadius) {
+            p = normalize(p) * minRadius;
+        }
+        const float scatteringR = m.rayleighScattering[c];
+        const float scatteringM0 = m.mieScattering[c];
+        const float scatteringM1 = m.mie1Scattering[c];
+        const float scattering = scatteringR + scatteringM0 + scatteringM1;
+        throughput *= scattering / m.extinction[c];
+
+        // 太陽への NEE: 位相関数は Rayleigh と Mie の各成分を σs の比で混ぜたもの
+        const float cosSun = dot(d, gSunDirection);
+        const float phaseSun = (scatteringR * RayleighPhase(cosSun) + scatteringM0 * MiePhase(gAtmosphere, 0, cosSun)[c] +
+                                scatteringM1 * MiePhase(gAtmosphere, 1, cosSun)[c]) / scattering;
+        luminance += throughput * phaseSun * SunTransmittanceRatioTracking(p, c, majorant, rng);
+
+        // 次の方向: σs の比で成分を選び、その成分の分布（Rayleigh は一様、Mie は g_k の Henyey-Greenstein）で
+        // サンプリング。重み = 混ぜた位相関数 / 混ぜた pdf（σs の重みは共通なので和で割らなくてよい）
+        const float pick = NextFloat(rng) * scattering;
+        float3 newDir;
+        if (pick < scatteringR) {
+            newDir = SampleUniformSphere(rng);
+        } else {
+            newDir = SampleHenyeyGreenstein(rng, d, pick - scatteringR < scatteringM0 ? g0 : g1);
+        }
+        const float cosNew = dot(newDir, d);
+        const float pdf = scatteringR * kIsotropicPhase + scatteringM0 * HenyeyGreensteinPhase(g0, cosNew) +
+                          scatteringM1 * HenyeyGreensteinPhase(g1, cosNew);
+        const float phase = scatteringR * RayleighPhase(cosNew) + scatteringM0 * MiePhase(gAtmosphere, 0, cosNew)[c] +
+                            scatteringM1 * MiePhase(gAtmosphere, 1, cosNew)[c];
+        throughput *= phase / max(pdf, 1e-30);
         d = newDir;
     }
     return luminance;
@@ -460,8 +569,14 @@ void CSMain(uint3 id : SV_DispatchThreadID)
     float3 sum = 0.0;
     for (uint s = 0; s < gSamplesPerDispatch; ++s) {
         [unroll] for (uint c = 0; c < 3; ++c) {
+#if MIE_GENERAL
+            // 解析式の媒質が一般形（2 成分・背景）。1 成分でも背景があれば TraceChannelTwoMie（成分 1 の σs は 0）
+            sum[c] += UseTableMedium() ? TraceChannelTable(c, gCameraPosKm, viewDir, rng)
+                                       : TraceChannelTwoMie(c, gCameraPosKm, viewDir, rng);
+#else
             sum[c] += UseTableMedium() ? TraceChannelTable(c, gCameraPosKm, viewDir, rng)
                                        : TraceChannel(c, gCameraPosKm, viewDir, rng);
+#endif
         }
     }
 
