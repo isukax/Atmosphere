@@ -10,6 +10,9 @@
 #include "common/Shadow.hlsli"
 #include "atmosphere/AtmosphereCommon.hlsli"
 #include "atmosphere/Phase.hlsli"
+#if MS_SH
+#include "atmosphere/MultiScatteringSh.hlsli"
+#endif
 
 #define SUN_TRANSMITTANCE_LUT 0
 #define SUN_TRANSMITTANCE_NESTED 1
@@ -38,8 +41,13 @@ struct AtmosphereLuts
 {
     uint   transmittanceSrv;
     float2 transmittanceSize;
-    uint   multiScatteringSrv;
-    float2 multiScatteringSize;
+    uint   multiScatteringSrv;    // MS_SH なら SH の係数のアトラス（32×32 のタイル 6 枚、design.md §5.11）
+    float2 multiScatteringSize;   // 1 枚のタイルの大きさ（32×32）
+#if MS_SH
+    // Mie の成分 0・1 の位相関数の Legendre のモーメント χ_0〜χ_2（RGB）。Rayleigh は (1, 0, 0.1) で固定
+    float3 mieChi[3];
+    float3 mie1Chi[3];
+#endif
 };
 
 // 不透明物（地形・球）の太陽の影。2 段のカスケード（design.md §5.5、§5.6）
@@ -136,6 +144,13 @@ struct ScatteringResult
     float3 multipleScattering;  // luminance のうち多重散乱の分 [sr⁻¹]（影の対象外。空気遠近法で単散乱と分けて持つ）
     float3 transmittance;     // カメラ → 積分区間の終端の透過率
     float  opaqueShadowMean;  // 視線上の点（各区間の中点）で太陽が見える割合の平均（影なしなら 1。検証用）
+#if MS_SH
+    // SH の Multi-scattering LUT の閉じ方（伝達行列 F）用: 成分ごとの ∫ T_view·σs dt と、地表に当たったか
+    float3 rayleighAs1;
+    float3 mieAs1;
+    float3 mie1As1;
+    bool   hitGround;
+#endif
 };
 
 // (1 − e^(−x)) / x を桁落ちなく計算する（x = σt·dt ≥ 0）。
@@ -175,6 +190,44 @@ float3 SampleMultipleScattering(AtmosphereParameters a, AtmosphereLuts luts, flo
     return lut.SampleLevel(gLinearClamp, uv, 0.0).rgb;
 }
 
+#if MS_SH
+// 点 p で視線 dir（見る向き）へ散乱される多重散乱の光源 [km⁻¹·sr⁻¹]（単位照度あたり。design.md §5.11）。
+//   J = Σ_k σs,k · Σ_b χ_{k,l(b)} · c_b(r, μs) · Y_b(dir)
+// c_b は入ってくる散乱光の場（散乱 1 回以上）の SH の係数、χ_{k,l} は成分 k の位相関数の Legendre のモーメント
+// （Funk–Hecke: 位相関数との畳み込みは帯 l ごとに χ_l 倍）。Rayleigh は χ = (1, 0, 0.1)。
+float3 MultipleScatteringSourceSh(AtmosphereParameters a, AtmosphereLuts luts, float3 p, float3 dir, float3 sunDir,
+                                  MediumSample m)
+{
+    const float r = length(p);
+    const float3 up = p / r;
+    const float muSun = dot(up, sunDir);
+    const float2 uv = MultiScatteringRMuSunToUv(a, r, muSun, luts.multiScatteringSize);
+    Texture2D<float4> lut = ResourceDescriptorHeap[luts.multiScatteringSrv];
+    float3 c[kMsShCount];
+    [unroll] for (uint b = 0; b < kMsShCount; ++b) {
+        c[b] = lut.SampleLevel(gLinearClamp, MsShAtlasUv(uv, b), 0.0).rgb;
+    }
+    // [POINT] 局所の枠の x 軸 = 太陽の水平の向き。太陽が真上・真下だと定まらないが、そこでは場が天頂の周りに
+    //         対称で m > 0 の係数が 0 なので、m > 0 の項を落とす
+    const float3 sunHorizontal = sunDir - muSun * up;
+    const float len2 = dot(sunHorizontal, sunHorizontal);
+    const float azimuthValid = len2 > 1e-12 ? 1.0 : 0.0;
+    const float3 xAxis = sunHorizontal * (azimuthValid * rsqrt(max(len2, 1e-30)));
+    const float z = dot(dir, up);
+    const float x = dot(dir, xAxis);
+    const MsShBasis basis = EvalMsShBasis(x, z, max(1.0 - x * x - z * z, 0.0));
+    const float3 band0 = c[0] * basis.y[0];
+    const float3 band1 = c[1] * basis.y[1] + c[2] * basis.y[2];
+    const float3 band2 = c[3] * basis.y[3] + c[4] * basis.y[4] + azimuthValid * c[5] * basis.y[5];
+    float3 source = m.rayleighScattering * (band0 + 0.1 * band2) +
+                    m.mieScattering * (luts.mieChi[0] * band0 + luts.mieChi[1] * band1 + luts.mieChi[2] * band2);
+#if MIE_GENERAL
+    source += m.mie1Scattering * (luts.mie1Chi[0] * band0 + luts.mie1Chi[1] * band1 + luts.mie1Chi[2] * band2);
+#endif
+    return source;
+}
+#endif
+
 ScatteringResult IntegrateScatteredLuminance(AtmosphereParameters a, AtmosphereLuts luts, IntegrationSettings s,
                                              float3 origin, float3 dir, float3 sunDir)
 {
@@ -186,6 +239,12 @@ ScatteringResult IntegrateScatteredLuminance(AtmosphereParameters a, AtmosphereL
     result.multipleScattering = 0.0;
     result.transmittance = 1.0;
     result.opaqueShadowMean = 1.0;
+#if MS_SH
+    result.rayleighAs1 = 0.0;
+    result.mieAs1 = 0.0;
+    result.mie1As1 = 0.0;
+    result.hitGround = false;
+#endif
 
     // 積分区間: 大気上端の内側から、地表に当たればそこまで
     float tTop0;
@@ -207,6 +266,9 @@ ScatteringResult IntegrateScatteredLuminance(AtmosphereParameters a, AtmosphereL
         tEnd = max(s.maxDistanceKm, tStart);
         hitGround = false;
     }
+#if MS_SH
+    result.hitGround = hitGround;
+#endif
 
     const float cosTheta = dot(dir, sunDir);
     const float phaseRayleigh = s.isotropicPhase ? kIsotropicPhase : RayleighPhase(cosTheta);
@@ -274,7 +336,11 @@ ScatteringResult IntegrateScatteredLuminance(AtmosphereParameters a, AtmosphereL
         }
         float3 multipleSource = 0.0;
         if (s.multipleScattering) {
+#if MS_SH
+            multipleSource = MultipleScatteringSourceSh(a, luts, p, dir, sunDir, m);
+#else
             multipleSource = scattering * SampleMultipleScattering(a, luts, p, sunDir);
+#endif
             source += multipleSource;
         }
         // [POINT] 区間内で媒質が一定とみなした解析積分（Hillaire の "energy-conserving" 積分）:
@@ -289,6 +355,13 @@ ScatteringResult IntegrateScatteredLuminance(AtmosphereParameters a, AtmosphereL
 #endif
         result.multiScatAs1 += throughput * scattering * segmentWeight;
         result.multipleScattering += throughput * multipleSource * segmentWeight;
+#if MS_SH
+        result.rayleighAs1 += throughput * m.rayleighScattering * segmentWeight;
+        result.mieAs1 += throughput * m.mieScattering * segmentWeight;
+#if MIE_GENERAL
+        result.mie1As1 += throughput * m.mie1Scattering * segmentWeight;
+#endif
+#endif
         throughput *= segmentTransmittance;
     }
 

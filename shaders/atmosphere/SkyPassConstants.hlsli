@@ -80,6 +80,8 @@ cbuffer SkyPassConstants : register(b0)
     uint   gSkyViewMie1LutSrv          : packoffset(c36.y);
     uint   gAerialPerspectiveMie1Uav   : packoffset(c36.z);
     uint   gAerialPerspectiveMie1Srv   : packoffset(c36.w);
+    // 多重散乱の SH 近似（MS_SH、design.md §5.11）: Mie の成分 0 の χ_0〜χ_2（c37〜c39）、成分 1 の χ_0〜χ_2（c40〜c42）
+    float4 gMsPhaseMoments[6]          : packoffset(c37);
 };
 
 // 定数の地形の影（2 段のカスケード）
@@ -107,6 +109,12 @@ AtmosphereLuts LoadAtmosphereLuts()
     luts.transmittanceSize = gTransmittanceLutSize;
     luts.multiScatteringSrv = gMultiScatteringLutSrv;
     luts.multiScatteringSize = gMultiScatteringLutSize;
+#if MS_SH
+    [unroll] for (uint l = 0; l < 3; ++l) {
+        luts.mieChi[l] = gMsPhaseMoments[l].rgb;
+        luts.mie1Chi[l] = gMsPhaseMoments[3 + l].rgb;
+    }
+#endif
     return luts;
 }
 

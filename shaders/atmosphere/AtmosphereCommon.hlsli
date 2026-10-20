@@ -17,6 +17,15 @@
 #define MIE_GENERAL 0
 #endif
 
+// [POINT] 多重散乱の近似の版（design.md §5.11）。0: Hillaire 2020 の等方の Ψ_ms（Multi-scattering LUT が RGB 1 つ）。
+//         1: 入ってくる散乱光の場を l ≤ 2 の球面調和（6 係数）で持ち、最後の散乱の位相関数を帯ごとの Legendre の
+//         モーメントで掛ける（地表との往復も閉じ方に含める）。CMake が Multi-scattering / Sky-View LUT・空気遠近法・
+//         レイマーチを 0 / 1 の両方でコンパイルし、C++ が AtmosphereQuality::multiScatteringModel で選ぶ。
+//         0 の版は今までと同じコード（SH の部分はすべて #if MS_SH の中）
+#ifndef MS_SH
+#define MS_SH 0
+#endif
+
 // [POINT] C++ の atmosphere::AtmosphereGpu（src/atmosphere/AtmosphereParams.h）と同じ並び。
 //         float3 + float の組で 16 バイトの行をちょうど埋めるので、HLSL と C++ の
 //         パッキングが一致する（static_assert で照合している）。

@@ -78,6 +78,12 @@ foreach(pass TransmittanceLut SkyRaymarch MultiScatteringLut SkyViewLut SkyFromL
              SkyIrradiance)
   compile_shader(atmosphere/${pass}.hlsl CSMain cs_6_6 ${pass}_mie_cs -D MIE_GENERAL=1)
 endforeach()
+# 多重散乱の SH 近似（design.md §5.11）の版。多重散乱を扱う 4 つのパスだけ。MS_SH = 0 の版は上と同じ
+# （AtmosphereCommon.hlsli の MS_SH）
+foreach(pass SkyRaymarch MultiScatteringLut SkyViewLut AerialPerspective)
+  compile_shader(atmosphere/${pass}.hlsl CSMain cs_6_6 ${pass}_sh_cs -D MS_SH=1)
+  compile_shader(atmosphere/${pass}.hlsl CSMain cs_6_6 ${pass}_mie_sh_cs -D MIE_GENERAL=1 -D MS_SH=1)
+endforeach()
 compile_shader(scene/Mesh.hlsl VSMain vs_6_6 Mesh_vs)
 compile_shader(scene/Mesh.hlsl PSMain ps_6_6 Mesh_ps)
 
@@ -93,6 +99,7 @@ add_executable(atmosphere
   src/atmosphere/AtmosphereParams.cpp
   src/atmosphere/AtmosphereRenderer.cpp
   src/atmosphere/MiePhaseTables.cpp
+  src/atmosphere/PhaseMoments.cpp
   src/atmosphere/PathTracer.cpp
   src/gfx/Device.cpp
   src/gfx/Buffer.cpp
@@ -118,6 +125,7 @@ add_executable(atmosphere
   src/batch/Phase4Tests.cpp
   src/batch/Phase45Tests.cpp
   src/batch/Phase48Tests.cpp
+  src/batch/Phase411Tests.cpp
 )
 add_dependencies(atmosphere shaders)
 

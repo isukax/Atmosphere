@@ -67,6 +67,7 @@ MieComponentPreset parseMieComponent(const nlohmann::json& j)
         for (const nlohmann::json& v : values) {
             c.phaseTable.emplace_back(v.at(0).get<float>(), v.at(1).get<float>(), v.at(2).get<float>(), 0.0f);
         }
+        c.phaseMoments = legendreMomentsTable(c.phaseTable);
     } else {
         throw std::runtime_error("Unknown Mie phase model: " + model);
     }
@@ -179,6 +180,7 @@ void AtmosphereParams::applyAerosolPreset(const AerosolPreset& preset)
     mieFreeTropScaleHeightKm = c.freeTropScaleHeightKm;
     miePhaseG = c.phaseG;
     miePhaseTableSrv = c.phaseTable.empty() ? kNoMiePhaseTable : c.phaseTableSrv;
+    miePhaseMoments = c.phaseMoments;
     mieComponentCount = static_cast<uint32_t>(preset.components.size());
     mie1 = {};
     if (mieComponentCount == 2) {
@@ -191,6 +193,7 @@ void AtmosphereParams::applyAerosolPreset(const AerosolPreset& preset)
         mie1.freeTropScaleHeightKm = c1.freeTropScaleHeightKm;
         mie1.phaseG = c1.phaseG;
         mie1.phaseTableSrv = c1.phaseTable.empty() ? kNoMiePhaseTable : c1.phaseTableSrv;
+        mie1.phaseMoments = c1.phaseMoments;
     }
     aerosolPreset = preset.name;
     aerosolPresetAod550 = preset.aod550;
@@ -287,6 +290,16 @@ glm::vec3 worldToPlanetKm(const AtmosphereParams& p, const glm::vec3& worldPosM)
 
 nlohmann::json toJson(const AtmosphereParams& p)
 {
+    // 位相関数の Legendre のモーメント（多重散乱の SH 近似で使う値。design.md §5.11）: [成分][l][RGB]
+    const MiePhaseMoments moments = mieLegendreMoments(p);
+    nlohmann::json phaseMoments = nlohmann::json::array();
+    for (uint32_t k = 0; k < p.mieComponentCount; ++k) {
+        nlohmann::json component = nlohmann::json::array();
+        for (const glm::vec3& chi : moments.component[k]) {
+            component.push_back(toJson(chi));
+        }
+        phaseMoments.push_back(component);
+    }
     nlohmann::json j = {
         {"coefficient_set", p.coefficientSet},
         {"working_space", display::toString(p.workingSpace)},
@@ -322,6 +335,7 @@ nlohmann::json toJson(const AtmosphereParams& p)
         {"sun_zenith_deg", p.sunZenithDeg},
         {"sun_azimuth_deg", p.sunAzimuthDeg},
         {"origin_altitude_m", p.originAltitudeM},
+        {"mie_phase_legendre_moments", phaseMoments},
     };
     if (p.mieComponentCount > 1) {
         // 2 つ目の Mie の成分（reference/atmosphere_ref.py の from_meta が読む）

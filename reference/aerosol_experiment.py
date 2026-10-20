@@ -135,7 +135,8 @@ def ray_extent(origin: np.ndarray, dirs: np.ndarray):
 def integrate(atmo: Atmosphere, table: TransmittanceTable, psi: "MultiScatteringTable | None", origin: np.ndarray,
               dirs: np.ndarray, sun: np.ndarray, steps: int, ground_albedo: float | None, isotropic: bool = False,
               chunk: int = 2048):
-    """視線ごとの (L, F)。L = 単位照度あたりの輝度 [sr⁻¹]、F = ∫ T_view·σs dt（f_ms 用）。"""
+    """視線ごとの (L, F)。L = 単位照度あたりの輝度 [sr⁻¹]、F = ∫ T_view·σs dt（f_ms 用）。
+    psi: 等方の Ψ_ms の表（lookup(r, μs)、光源 = σs·Ψ_ms）か、光源を作る表（source(...)、ms_sh.py の SH）。"""
 
     n = dirs.shape[0]
     lum = np.zeros((n, 3))
@@ -165,7 +166,11 @@ def integrate(atmo: Atmosphere, table: TransmittanceTable, psi: "MultiScattering
         scattering = s_r + sum(s_m)
         integrand = view_t * source * sun_t
         if psi is not None:
-            integrand = integrand + view_t * scattering * psi.lookup(r, mu_sun)
+            if getattr(psi, "source", None) is not None:
+                # SH の多重散乱（ms_sh.py）: 光源が視線の向きと成分ごとの χ によるので、表が光源を作る
+                integrand = integrand + view_t * psi.source(p, r, mu_sun, d, sun, [s_r] + list(s_m))
+            else:
+                integrand = integrand + view_t * scattering * psi.lookup(r, mu_sun)
         lum[a:a + chunk] = np.einsum("nm,nmc->nc", dt, integrand)
         fms[a:a + chunk] = np.einsum("nm,nmc->nc", dt, view_t * scattering)
         if ground_albedo is not None and np.any(hit):

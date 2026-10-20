@@ -14,7 +14,7 @@ namespace gfx {
 ///         （フレームスロットごとにクエリ範囲を分け、次にそのスロットを使うときに読む）。
 class GpuTimer {
 public:
-    static constexpr uint32_t kMaxScopes = 32;
+    static constexpr uint32_t kMaxScopes = 48;
 
     GpuTimer(Device& device, uint32_t slotCount);
 

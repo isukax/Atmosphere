@@ -11,10 +11,12 @@
 //     Phase 4.5: shadow_surface, shadow_aerial_perspective, shadow_ap_methods
 //     Phase 4.8: aerosol_presets（比較は reference/validate_phase4_8.py）
 //     Phase 4.9: aerosol_presets（2 成分のプリセットを含む）、aerosol_scene（比較は reference/validate_phase4_9.py）
+//     Phase 4.11: multiscattering_sh（多重散乱の SH 近似。比較は reference/validate_phase4_11.py）
 #include "app/App.h"
 #include "batch/Phase1Tests.h"
 #include "batch/Phase2Tests.h"
 #include "batch/Phase3Tests.h"
+#include "batch/Phase411Tests.h"
 #include "batch/Phase45Tests.h"
 #include "batch/Phase48Tests.h"
 #include "batch/Phase4Tests.h"
@@ -60,6 +62,9 @@ int main(int argc, char** argv)
             }
             if (test == "aerosol_presets" || test == "aerosol_scene") {
                 return batch::runPhase48Test(device, pipelines, test, outDir);
+            }
+            if (test == "multiscattering_sh") {
+                return batch::runPhase411Test(device, pipelines, test, outDir);
             }
             return batch::runPhase3Test(device, pipelines, test, outDir);
         }

@@ -462,6 +462,25 @@ int runPerf(gfx::Device& device, const gfx::PipelineLibrary& pipelines, const st
                 t = timer.begin(cmd, "sky_and_aerial_perspective_composite_per_pixel_c_a_b_d");
                 atmo.renderSkyFromLut(cmd, device.upload(), paramsD, perPixelView, targets.color.uavIndex(), w, h);
                 timer.end(cmd, t);
+                // Phase 4.11: 多重散乱の SH 近似（design.md §5.11）。SH の Multi-scattering LUT（媒質の変更時だけ）と、
+                // それを読む毎フレームのパス。上の同名のパスとの差が SH の版のコスト（次のフレームの先頭で等方に戻る）
+                for (const bool d : {false, true}) {
+                    const atmosphere::AtmosphereParams& p = d ? paramsD : params;
+                    atmo.invalidateLuts();
+                    atmo.updateTransmittanceLut(cmd, device.upload(), p, quality.transmittanceSteps);
+                    t = timer.begin(cmd, d ? "multiscattering_lut_40_sh_c_a_b_d" : "multiscattering_lut_40_sh");
+                    atmo.updateMultiScatteringLut(cmd, device.upload(), p, quality.multiScatteringSteps,
+                                                  atmosphere::SunTransmittanceMode::Lut, 0,
+                                                  gfx::kInvalidDescriptorIndex, quality.multiScatteringUniformSteps,
+                                                  atmosphere::MultiScatteringModel::ShL2Ground);
+                    timer.end(cmd, t);
+                    t = timer.begin(cmd, d ? "sky_view_lut_30_sh_c_a_b_d" : "sky_view_lut_30_sh");
+                    atmo.updateSkyViewLut(cmd, device.upload(), p, view.cameraPosKm, quality.skyViewSteps, true);
+                    timer.end(cmd, t);
+                    t = timer.begin(cmd, d ? "aerial_perspective_volume_sh_c_a_b_d" : "aerial_perspective_volume_sh");
+                    atmo.updateAerialPerspective(cmd, device.upload(), p, view, true);
+                    timer.end(cmd, t);
+                }
                 targets.color.transition(cmd, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
                 output.transition(cmd, D3D12_RESOURCE_STATE_RENDER_TARGET);
                 display::DisplayPassInput input;

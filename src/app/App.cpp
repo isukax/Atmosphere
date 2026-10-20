@@ -740,6 +740,11 @@ void App::drawAtmosphereUi()
         sliderSteps("Transmittance LUT steps", m_quality.transmittanceSteps, 4, 1000);
         sliderSteps("Multi-scattering LUT steps", m_quality.multiScatteringSteps, 4, 256);
         ImGui::Checkbox("Multi-scattering LUT: uniform steps", &m_quality.multiScatteringUniformSteps);
+        // 多重散乱の近似（design.md §5.11）: 等方の Ψ_ms（Hillaire 2020）/ l ≤ 2 の球面調和 + 地表との往復
+        int msModel = static_cast<int>(m_quality.multiScatteringModel);
+        if (ImGui::Combo("Multi-scattering model", &msModel, "Isotropic (Hillaire 2020)\0SH l<=2 + ground\0")) {
+            m_quality.multiScatteringModel = static_cast<atmosphere::MultiScatteringModel>(msModel);
+        }
         if (m_sceneMode == SceneMode::SkyLut) {
             sliderSteps("Sky-View LUT steps", m_quality.skyViewSteps, 4, 256);
         }
@@ -779,11 +784,19 @@ void App::drawTextureViewUi(const ImVec2& pos)
         const gfx::Texture& lut = m_atmosphereRenderer->transmittanceLut();
         ImGui::Image(static_cast<ImTextureID>(m_device.bindless().gpu(lut.srvIndex()).ptr), ImVec2(384.0f, 96.0f));
         ImGui::TextDisabled("x: view zenith (left: up, right: horizon), y: altitude (top: ground)");
-        ImGui::SeparatorText("Multi-scattering LUT (32x32), Sky-View LUT (192x108)");
-        const gfx::Texture& ms = m_atmosphereRenderer->multiScatteringLut();
+        const bool msSh = m_atmosphereRenderer->multiScatteringModel() == atmosphere::MultiScatteringModel::ShL2Ground;
+        ImGui::SeparatorText(msSh ? "Multi-scattering SH LUT (6 x 32x32), Sky-View LUT (192x108)"
+                                  : "Multi-scattering LUT (32x32), Sky-View LUT (192x108)");
+        const gfx::Texture& ms = msSh ? m_atmosphereRenderer->multiScatteringShLut()
+                                      : m_atmosphereRenderer->multiScatteringLut();
         const gfx::Texture& sv = m_atmosphereRenderer->skyViewLut();
-        ImGui::Image(static_cast<ImTextureID>(m_device.bindless().gpu(ms.srvIndex()).ptr), ImVec2(96.0f, 96.0f));
-        ImGui::SameLine();
+        if (msSh) {
+            // SH の係数は負にもなる（表示はクランプ）。並び: (l, m) = (0,0) (1,0) (1,1) (2,0) (2,1) (2,2)
+            ImGui::Image(static_cast<ImTextureID>(m_device.bindless().gpu(ms.srvIndex()).ptr), ImVec2(288.0f, 48.0f));
+        } else {
+            ImGui::Image(static_cast<ImTextureID>(m_device.bindless().gpu(ms.srvIndex()).ptr), ImVec2(96.0f, 96.0f));
+            ImGui::SameLine();
+        }
         ImGui::Image(static_cast<ImTextureID>(m_device.bindless().gpu(sv.srvIndex()).ptr), ImVec2(192.0f, 108.0f));
         ImGui::TextDisabled("MS: x = cos(sun zenith) -1..1, y = altitude. Sky-View: x = azimuth from sun, y = zenith");
         const gfx::Texture& svMie = m_atmosphereRenderer->skyViewMieLut();

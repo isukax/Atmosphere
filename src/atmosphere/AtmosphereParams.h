@@ -8,6 +8,7 @@
 //   *Lux     … lx（照度）
 //   *Rad/Deg … 角度
 
+#include "atmosphere/PhaseMoments.h"
 #include "display/ColorSpace.h"
 
 #include <glm/vec3.hpp>
@@ -39,6 +40,7 @@ struct MieComponentPreset {
     float phaseG = 0.8f;  // Cornette-Shanks の g。表のときは平均の余弦（G。パストレーサーのサンプリング用）
     std::vector<glm::vec4> phaseTable;          // 位相関数の表 [sr⁻¹]（RGB + 0）。空なら Cornette-Shanks
     uint32_t phaseTableSrv = kNoMiePhaseTable;  // GPU に上げた表（MiePhaseTables が設定する）
+    PhaseMoments phaseMoments{};                // 表の Legendre のモーメント χ_0〜χ_2（表のときだけ。design.md §5.11）
 };
 
 /// 2 つ目の Mie の成分（2 成分のプリセット。design.md §5.9）。意味は AtmosphereParams の成分 0 の同名の値と同じ。
@@ -51,6 +53,7 @@ struct MieComponentParams {
     float freeTropScaleHeightKm = 1.0f;
     float phaseG = 0.8f;
     uint32_t phaseTableSrv = kNoMiePhaseTable;
+    PhaseMoments phaseMoments{};
 };
 
 /// エアロゾルのプリセット（research.md §12 の変種。base / base+A / base+B / base+A+B / C / C+A / C+B / C+A+B / C+D /
@@ -96,6 +99,7 @@ struct AtmosphereParams {
     float mieFreeTropScaleHeightKm = 1.0f;         // H_FT（> 0）
     float miePhaseG = 0.8f;                        // Cornette-Shanks の g（表のときは平均の余弦）
     uint32_t miePhaseTableSrv = kNoMiePhaseTable;  // 位相関数の表（GPU）。無効値なら Cornette-Shanks
+    PhaseMoments miePhaseMoments{};                // 表の Legendre のモーメント（表のときだけ使う。mieLegendreMoments）
     // [POINT] 上の mie* は Mie の成分 0。2 成分のプリセット（鉛直分布が違う fine / coarse、design.md §5.9）では
     //         成分 1 を mie1 に持つ
     uint32_t mieComponentCount = 1;

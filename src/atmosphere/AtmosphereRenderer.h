@@ -10,26 +10,50 @@
 #include <glm/mat4x4.hpp>
 
 #include <optional>
+#include <stdexcept>
 #include <string>
 
 namespace atmosphere {
 
+/// 多重散乱の近似（design.md §5.11）。シェーダーの版 MS_SH = 0 / 1（AtmosphereCommon.hlsli）に対応する。
+enum class MultiScatteringModel : uint32_t {
+    Isotropic = 0,   // Hillaire 2020 の等方の Ψ_ms（Multi-scattering LUT は RGB 1 つ）
+    ShL2Ground = 1,  // 入ってくる散乱光の場を l ≤ 2 の球面調和（6 係数）で持つ。閉じ方に地表との往復を含める
+};
+
 /// 媒質を扱うパスの、シェーダーの 2 つの版（MIE_GENERAL = 0 / 1、CMakeLists.txt・AtmosphereCommon.hlsli）。
 /// [POINT] 1 成分・背景なしのプリセットで成分 1 の分岐を残すと GPU 時間が 10〜30% 増えたので、版を分けて
 ///         媒質に合わせて選ぶ（usesGeneralMieMedium）。どちらの版でも結果は同じ（0 の版が扱える媒質では）
+///
+/// 多重散乱を扱うパス（Multi-scattering / Sky-View LUT・空気遠近法・レイマーチ）は、多重散乱の近似の 2 つの版
+/// （MS_SH = 0 / 1、*_sh_cs / *_mie_sh_cs）も持つ（`shVariants`）。
 struct MediumPso {
-    MediumPso(const gfx::PipelineLibrary& pipelines, const std::string& pass)
+    MediumPso(const gfx::PipelineLibrary& pipelines, const std::string& pass, bool shVariants = false)
         : basic(pipelines.createCompute((pass + "_cs").c_str())),
           general(pipelines.createCompute((pass + "_mie_cs").c_str()))
     {
+        if (shVariants) {
+            basicSh = pipelines.createCompute((pass + "_sh_cs").c_str());
+            generalSh = pipelines.createCompute((pass + "_mie_sh_cs").c_str());
+        }
     }
-    ID3D12PipelineState* get(const AtmosphereParams& params) const
+    ID3D12PipelineState* get(const AtmosphereParams& params,
+                             MultiScatteringModel model = MultiScatteringModel::Isotropic) const
     {
-        return usesGeneralMieMedium(params) ? general.Get() : basic.Get();
+        const bool generalMie = usesGeneralMieMedium(params);
+        if (model == MultiScatteringModel::ShL2Ground) {
+            if (!basicSh) {
+                throw std::runtime_error("MediumPso: this pass has no spherical-harmonics variant");
+            }
+            return generalMie ? generalSh.Get() : basicSh.Get();
+        }
+        return generalMie ? general.Get() : basic.Get();
     }
 
-    ComPtr<ID3D12PipelineState> basic;    // 1 成分・背景なし（Phase 4.8 と同じコード）
-    ComPtr<ID3D12PipelineState> general;  // 2 成分・自由大気の背景
+    ComPtr<ID3D12PipelineState> basic;      // 1 成分・背景なし（Phase 4.8 と同じコード）
+    ComPtr<ID3D12PipelineState> general;    // 2 成分・自由大気の背景
+    ComPtr<ID3D12PipelineState> basicSh;    // 多重散乱の SH 近似の版（shVariants のときだけ）
+    ComPtr<ID3D12PipelineState> generalSh;
 };
 
 /// 太陽方向の透過率の求め方（AtmosphereIntegrate.hlsli の SUN_TRANSMITTANCE_* と一致させる）。
@@ -66,6 +90,9 @@ struct AtmosphereQuality {
     bool multiScatteringUniformSteps = false;
     uint32_t skyViewSteps = 30;          // 論文の PC 設定
     bool multipleScattering = true;
+    // [POINT] 多重散乱の近似（design.md §5.11、§12 Q28）。SH の版は地上・低い太陽・夕方の空と、地面を照らした
+    //         画面を大きく改善するが、LUT の作り直しが重い（媒質を変えたときだけ）
+    MultiScatteringModel multiScatteringModel = MultiScatteringModel::Isotropic;
 };
 
 /// リファレンスのレイマーチの設定。
@@ -105,6 +132,7 @@ public:
     static constexpr uint32_t kTransmittanceWidth = 256;
     static constexpr uint32_t kTransmittanceHeight = 64;
     static constexpr uint32_t kMultiScatteringSize = 32;
+    static constexpr uint32_t kMultiScatteringShCoefficients = 6;  // l ≤ 2 の鏡映対称の球面調和（design.md §5.11）
     static constexpr uint32_t kSkyViewWidth = 192;
     static constexpr uint32_t kSkyViewHeight = 108;
     static constexpr uint32_t kAerialPerspectiveSize = 32;   // 32×32×32
@@ -118,12 +146,15 @@ public:
     ///         前回と同じなら何もしない（作り直したら true）。LUT は終了時に全シェーダーから読める状態。
     bool updateTransmittanceLut(ID3D12GraphicsCommandList* cmd, gfx::UploadRing& upload, const AtmosphereParams& params,
                                 uint32_t stepCount, uint32_t debugRMuUav = gfx::kInvalidDescriptorIndex);
-    /// Multi-scattering LUT。媒質・ステップ数・Transmittance LUT のどれかが変わったときだけ作り直す。
-    /// `uniformSteps`: 光線上の区間を等間隔に置く（既定）。false で 2 次配置（比較検証用）。
+    /// Multi-scattering LUT。媒質・ステップ数・Transmittance LUT・近似のモデルのどれかが変わったときだけ作り直す。
+    /// `uniformSteps`: true で光線上の区間を等間隔に置く（引数の既定。比較検証用）、false で 2 次配置
+    /// （実用の設定 AtmosphereQuality の既定）。
+    /// `model`: 多重散乱の近似。これ以降の Sky-View LUT・空気遠近法・レイマーチは、最後に作った LUT のモデルの版で描く。
     bool updateMultiScatteringLut(ID3D12GraphicsCommandList* cmd, gfx::UploadRing& upload,
                                   const AtmosphereParams& params, uint32_t stepCount,
                                   SunTransmittanceMode sunMode = SunTransmittanceMode::Lut, uint32_t nestedSteps = 0,
-                                  uint32_t debugUav = gfx::kInvalidDescriptorIndex, bool uniformSteps = true);
+                                  uint32_t debugUav = gfx::kInvalidDescriptorIndex, bool uniformSteps = true,
+                                  MultiScatteringModel model = MultiScatteringModel::Isotropic);
     /// Sky-View LUT。カメラの高度と太陽の向きで変わるので毎フレーム作る。
     void updateSkyViewLut(ID3D12GraphicsCommandList* cmd, gfx::UploadRing& upload, const AtmosphereParams& params,
                           const glm::vec3& cameraPosKm, uint32_t stepCount, bool multipleScattering);
@@ -158,6 +189,10 @@ public:
 
     gfx::Texture& transmittanceLut() { return m_transmittanceLut; }
     gfx::Texture& multiScatteringLut() { return m_multiScatteringLut; }
+    /// 多重散乱の SH 近似の係数のアトラス（192×32 = 32×32 のタイル 6 枚、RGB。design.md §5.11）
+    gfx::Texture& multiScatteringShLut() { return m_multiScatteringShLut; }
+    /// 最後に作った Multi-scattering LUT のモデル（描画のパスはこの版を使う）
+    MultiScatteringModel multiScatteringModel() const { return m_multiScatteringModel; }
     gfx::Texture& skyViewLut() { return m_skyViewLut; }
     /// Sky-View LUT の 2 枚目: Mie の単散乱から位相関数を除いた積分（描画時に p_M(θ) を掛ける）
     gfx::Texture& skyViewMieLut() { return m_skyViewMieLut; }
@@ -185,6 +220,7 @@ private:
     MediumPso m_skyIrradiancePso;
     gfx::Texture m_transmittanceLut;
     gfx::Texture m_multiScatteringLut;
+    gfx::Texture m_multiScatteringShLut;  // SH の係数のアトラス（MultiScatteringModel::ShL2Ground）
     gfx::Texture m_skyViewLut;     // Rayleigh の単散乱 + 多重散乱 [sr⁻¹]
     gfx::Texture m_skyViewMieLut;  // Mie の単散乱（位相関数なし）[無次元]
     gfx::Texture m_skyViewMie1Lut; // Mie の成分 1 の同じ量（2 成分のプリセットだけ書く。design.md §5.9）
@@ -203,6 +239,7 @@ private:
     SunTransmittanceMode m_multiScatteringSunMode = SunTransmittanceMode::Lut;
     bool m_multiScatteringUniformSteps = false;
     uint64_t m_multiScatteringTransmittanceVersion = 0;
+    MultiScatteringModel m_multiScatteringModel = MultiScatteringModel::Isotropic;
 };
 
 } // namespace atmosphere

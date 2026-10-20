@@ -260,28 +260,87 @@ class Atmosphere:
         fms = ms1.mean(axis=0)
         return second_order / (1.0 - fms)  # Ψ_ms = L₂ / (1 − f_ms)
 
+    def multiple_scattering_sh(self, r_km: float, mu_sun: float, ground_albedo, moments: np.ndarray,
+                               outer_panels: int = 32, inner_panels: int = 8, order: int = 4) -> np.ndarray:
+        """多重散乱の SH 近似の係数 c_b（6, C）（design.md §5.11。シェーダーの MultiScatteringLut.hlsl の MS_SH の版と
+        同じ方向・同じ式）。moments: Mie の成分ごとの χ_0〜χ_2、形状 (成分, 3, C)。Rayleigh は (1, 0, 0.1)。
+
+          c₁ = Σ w·Y_b·L₁（L₁ = 実際の位相関数の単散乱 + 地表での直達光の反射）
+          F_ab = Σ w·Y_a·Y_b·Ã_{l(b)} + (ρ/π)·G_a·e_b（m ごとのブロック）、c = (I − F)⁻¹·c₁"""
+
+        dirs, weights = sh_sun_grid(mu_sun)
+        origin = np.array([0.0, r_km, 0.0])
+        sun = np.array([np.sqrt(max(0.0, 1.0 - mu_sun * mu_sun)), mu_sun, 0.0])
+        lum, _, extra = self.scattering_integrals(origin, dirs, sun, ground_albedo=ground_albedo,
+                                                  outer_panels=outer_panels, inner_panels=inner_panels, order=order,
+                                                  components=True)
+        # SH の枠: z = +Y、x = +X、y = −Z（基底は y² だけ）
+        basis = sh_basis6(dirs[:, 0], dirs[:, 1], dirs[:, 2] ** 2)                 # (N, 6)
+        n_ch = lum.shape[1]
+        moments = np.asarray(moments, dtype=np.float64).reshape(-1, 3, n_ch)
+        rayleigh_chi = np.array([1.0, 0.0, 0.1])
+        a_k = extra["as1"]                                                          # (N, K, C)
+        band_as1 = rayleigh_chi[None, :, None] * a_k[:, 0, None, :]                # (N, 3, C)
+        for k in range(1, a_k.shape[1]):
+            band_as1 = band_as1 + moments[k - 1][None] * a_k[:, k, None, :]
+        c1 = np.einsum("n,nb,nc->bc", weights, basis, lum)
+        tg = np.where(extra["hit_ground"][:, None], extra["ground_transmittance"], 0.0)
+        albedo = np.broadcast_to(np.asarray(ground_albedo, dtype=np.float64), (n_ch,))
+        coeffs = np.zeros((6, n_ch))
+        for block in SH_BLOCKS:
+            idx = np.array(block)
+            bands = SH_BANDS[idx]
+            f = np.einsum("n,na,nb,nbc->cab", weights, basis[:, idx], basis[:, idx], band_as1[:, bands, :])
+            if 0 in block:
+                g = np.einsum("n,na,nc->ca", weights, basis[:, idx], tg)               # (C, 3)
+                f = f + (albedo / np.pi)[:, None, None] * g[:, :, None] * SH_HEMISPHERE_COSINE[idx][None, None, :]
+            a = np.eye(idx.size)[None] - f
+            coeffs[idx] = np.linalg.solve(a, c1[idx].T[..., None])[..., 0].T
+        return coeffs
+
+    def legendre_moments(self, component: int = 0, count: int = 400001) -> np.ndarray:
+        """Mie の成分の位相関数の Legendre のモーメント χ_0〜χ_2、形状 (3, C)。u（θ = π·u²）で台形則（GPU と同じ
+        補間の位相関数を、C++ の PhaseMoments とは別の積分で求める）。"""
+
+        u = np.linspace(0.0, 1.0, count)
+        mu = np.cos(np.pi * u * u)
+        dmu_du = np.sin(np.pi * u * u) * 2.0 * np.pi * u
+        p = self.mie_phase(mu, component)                                           # (U, C or 1)
+        pl = np.stack([np.ones_like(mu), mu, 0.5 * (3.0 * mu * mu - 1.0)])
+        return 2.0 * np.pi * np.trapezoid(pl[:, :, None] * p[None] * dmu_du[None, :, None], u, axis=1)
+
     def scattering_integrals(self, camera_km: np.ndarray, directions: np.ndarray, sun_dir: np.ndarray,
                              isotropic: bool = False, ground_albedo=None, outer_panels: int = 32,
-                             inner_panels: int = 8, order: int = 4, chunk: int = 8):
+                             inner_panels: int = 8, order: int = 4, chunk: int = 8, components: bool = False):
         """視線ごとの積分 (L, F)、形状 (N, C)。
           L = ∫ T_view·Σ σs·p·T_sun dt（+ 地表の反射）… 単位照度あたりの輝度 [sr⁻¹]
           F = ∫ T_view·σs dt                         … f_ms の被積分量（Multi-scattering LUT 用）
-        isotropic: 位相関数を 1/(4π) にする。ground_albedo: 地表のランバート反射を加える（None なら加えない）。"""
+        isotropic: 位相関数を 1/(4π) にする。ground_albedo: 地表のランバート反射を加える（None なら加えない）。
+        components: True なら 3 つ目の戻り値に、成分ごとの ∫ T_view·σs,k dt（"as1"、(N, K, C)。K = Rayleigh・Mie・
+        Mie の成分 1）、地表に当たったか（"hit_ground"）、終端までの透過率（"ground_transmittance"）を返す。"""
 
         directions = np.asarray(directions, dtype=np.float64).reshape(-1, 3)
         directions = directions / np.linalg.norm(directions, axis=1, keepdims=True)
         camera_km = np.asarray(camera_km, dtype=np.float64)
         sun_dir = np.asarray(sun_dir, dtype=np.float64)
         n_ch = self.channel_count
-        lum = np.zeros((directions.shape[0], n_ch))
-        ms1 = np.zeros((directions.shape[0], n_ch))
-        for start in range(0, directions.shape[0], chunk):
-            lum[start:start + chunk], ms1[start:start + chunk] = self._ray_chunk(
-                camera_km, directions[start:start + chunk], sun_dir, outer_panels, inner_panels, order, isotropic,
-                ground_albedo)
-        return lum, ms1
+        n = directions.shape[0]
+        lum = np.zeros((n, n_ch))
+        ms1 = np.zeros((n, n_ch))
+        k = 3 if self.has_mie1 else 2
+        extra = {"as1": np.zeros((n, k, n_ch)), "hit_ground": np.zeros(n, dtype=bool),
+                 "ground_transmittance": np.zeros((n, n_ch))}
+        for start in range(0, n, chunk):
+            sl = slice(start, start + chunk)
+            out = self._ray_chunk(camera_km, directions[sl], sun_dir, outer_panels, inner_panels, order, isotropic,
+                                  ground_albedo, components)
+            lum[sl], ms1[sl] = out[0], out[1]
+            if components:
+                extra["as1"][sl], extra["hit_ground"][sl], extra["ground_transmittance"][sl] = out[2]
+        return (lum, ms1, extra) if components else (lum, ms1)
 
-    def _ray_chunk(self, c, dirs, sun, outer_panels, inner_panels, order, isotropic, ground_albedo):
+    def _ray_chunk(self, c, dirs, sun, outer_panels, inner_panels, order, isotropic, ground_albedo,
+                   components=False):
         n = dirs.shape[0]
         n_ch = self.channel_count
         t_start, t_end = np.zeros(n), np.zeros(n)
@@ -347,6 +406,10 @@ class Atmosphere:
         sun_t = self.sun_transmittance(p.reshape(-1, 3), sun, inner_panels, order).reshape(r.shape + (n_ch,))
         lum = np.einsum("nm,nmc->nc", w, view_t * source * sun_t)
         ms1 = np.einsum("nm,nmc->nc", w, view_t * sigma_s)
+        as1 = None
+        if components:
+            sigmas = [sigma_r, sigma_m] + ([sigma_m1] if self.has_mie1 else [])
+            as1 = np.stack([np.einsum("nm,nmc->nc", w, view_t * s_k) for s_k in sigmas], axis=1)
 
         if ground_albedo is not None and np.any(hit_ground):
             # 地表のランバート反射: ρ/π · T_sun · cos(太陽天頂角)、カメラ → 地表の透過率を掛ける
@@ -357,6 +420,8 @@ class Atmosphere:
             ground_t = self.sun_transmittance(ground_pos, sun, inner_panels, order)
             total_view_t = np.exp(-cumulative[g, -1, :])
             lum[g] += total_view_t * ground_t * cos_sun[:, None] * np.asarray(ground_albedo) / np.pi
+        if components:
+            return lum, ms1, (as1, hit_ground, np.exp(-cumulative[:, -1, :]))
         return lum, ms1
 
     def sun_transmittance(self, points_km: np.ndarray, sun: np.ndarray, panels: int, order: int) -> np.ndarray:
@@ -370,6 +435,40 @@ class Atmosphere:
         if np.any(lit):
             t[lit] = self.transmittance_to_top(r[lit], mu[lit], panels, order)
         return t
+
+
+# ---------------------------------------------------------------------- 多重散乱の SH 近似（design.md §5.11）
+# 並び b = 0〜5: (l, m) = (0,0), (1,0), (1,1), (2,0), (2,1), (2,2)。Condon–Shortley の符号なし（シェーダーと同じ）
+SH_BANDS = np.array([0, 1, 1, 2, 2, 2])
+SH_BLOCKS = ((0, 1, 3), (2, 4), (5,))  # m = 0 / 1 / 2 のブロック（F はブロック対角）
+# e_b = ∫_{z>0} Y_b·z dω（地表の照度。m > 0 は 0）
+SH_HEMISPHERE_COSINE = np.array([0.886226925452758, 1.0233267079464885, 0.0, 0.4954159122921, 0.0, 0.0])
+
+
+def sh_basis6(x: np.ndarray, z: np.ndarray, y2: np.ndarray) -> np.ndarray:
+    """局所の枠での方向の成分 x, z と y² から、6 つの基底の値、形状 (..., 6)"""
+
+    return np.stack([np.full(np.shape(x), 0.28209479177387814), 0.4886025119029199 * z, 0.4886025119029199 * x,
+                     0.31539156525252005 * (3.0 * z * z - 1.0), 1.0925484305920792 * x * z,
+                     0.5462742152960396 * (x * x - y2)], axis=-1)
+
+
+def sh_sun_grid(mu_sun: float, n_theta: int = 32, n_phi: int = 32):
+    """太陽中心の方向の格子（θ = π·u²、立体角の重み、和 = 4π）。シェーダーの SH の Multi-scattering LUT と同じ並び
+    （格子の枠: z' = 太陽、x' = (−μs, sinθs, 0)、y' = +Z）。(方向 (N, 3), 重み (N,))"""
+
+    s = np.sqrt(max(0.0, 1.0 - mu_sun * mu_sun))
+    sun = np.array([s, mu_sun, 0.0])
+    gx, gy = np.array([-mu_sun, s, 0.0]), np.array([0.0, 0.0, 1.0])
+    ring = np.arange(n_theta)
+    u0, u1, uc = ring / n_theta, (ring + 1) / n_theta, (ring + 0.5) / n_theta
+    theta = np.pi * uc * uc
+    w_ring = (np.cos(np.pi * u0 * u0) - np.cos(np.pi * u1 * u1)) * (2.0 * np.pi / n_phi)
+    phi = 2.0 * np.pi * (np.arange(n_phi) + 0.5) / n_phi
+    th, ph = np.meshgrid(theta, phi, indexing="ij")
+    local = np.stack([np.sin(th) * np.cos(ph), np.sin(th) * np.sin(ph), np.cos(th)], axis=-1).reshape(-1, 3)
+    dirs = local[:, :1] * gx + local[:, 1:2] * gy + local[:, 2:] * sun
+    return dirs, np.repeat(w_ring, n_phi)
 
 
 # ---------------------------------------------------------------------- 補助関数

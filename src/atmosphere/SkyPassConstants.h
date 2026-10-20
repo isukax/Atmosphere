@@ -72,6 +72,7 @@ struct SkyPassConstants {
     uint32_t skyViewMie1LutSrv;        // c36.y
     uint32_t aerialPerspectiveMie1Uav; // c36.z
     uint32_t aerialPerspectiveMie1Srv; // c36.w
+    float msPhaseMoments[6][4];        // c37-c42 多重散乱の SH 近似: Mie の成分 0・1 の χ_0〜χ_2（RGB、design.md §5.11）
 };
 // [POINT] HLSL の packoffset と 1 対 1 で照合する（cN = N×16 バイト目）
 static_assert(offsetof(SkyPassConstants, invViewProjRot) == 10 * 16);
@@ -107,6 +108,7 @@ static_assert(offsetof(SkyPassConstants, apShadowFilterScale) == 35 * 16);
 static_assert(offsetof(SkyPassConstants, aerialPerspectiveMsSrv) == 35 * 16 + 12);
 static_assert(offsetof(SkyPassConstants, skyViewMie1LutUav) == 36 * 16);
 static_assert(offsetof(SkyPassConstants, aerialPerspectiveMie1Srv) == 36 * 16 + 12);
-static_assert(sizeof(SkyPassConstants) == 37 * 16);
+static_assert(offsetof(SkyPassConstants, msPhaseMoments) == 37 * 16);
+static_assert(sizeof(SkyPassConstants) == 43 * 16);
 
 } // namespace atmosphere
