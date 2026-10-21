@@ -4,6 +4,8 @@ Hillaire2020 / C+A+B に固定した D3D12 大気モジュールと、単独で�
 
 固定構成は Sun disk 有効、SH L2 + ground、AP 透過率 RGB Mean、AP Shadow Per Pixel。Mie は1成分のテーブル位相関数です。空の背景の光芒、他のプリセット・方式選択、リファレンス描画は含みません。
 
+レンダリングの順序、各 LUT の役割、散乱・影・合成の計算方法は [レンダリングと技術](RENDERING.md) を参照してください。
+
 ## ビルド
 
 Windows、Visual Studio 2026、CMake 3.25 以上、Windows SDK の DXC、vcpkg が必要です。GPU は D3D12、SM 6.6、Resource Binding Tier 3 に対応している必要があります。
