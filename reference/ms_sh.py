@@ -14,6 +14,9 @@ GPU の SH の Multi-scattering LUT（design.md §5.11 の予定）の Python �
            方向は太陽中心の 1,024 方向（θ = π·u²、32 環 × 方位 32。compare_v4b_views.Option1MultiScatteringTable と同じ）。
   閉じ方 : c = (I − F)⁻¹·c₁（チャンネルごと）。
              F_ab = Σ_n w_n·Y_a·Y_b·Σ_k χ_{k,l(b)}·A_k(ω_n)、A_k = ∫ T·σs,k dt
+           F は μs によらないので、既定（transfer="zenith"）は高度ごとに天頂角の 1 次元の求積で作る（方位は解析的に
+           積分。地平線で地面側 64 本・空側 64 本に分ける。GPU の CSTransfer と同じ）。transfer="grid" は c₁ と同じ
+           太陽中心の格子で積む（Phase 4.11 の最初の版。μs ごとに地平線付近の刻みが違い、F がばらつく）。
              地表の項: 地面に当たる方向に (ρ/π)·T_g·e_b を足す（e_b = ∫_{z>0} Y_b·z dω、m = 0 の 3 つだけ 0 でない）。
            大気が天頂の周りに回転対称なので、F は m ごとのブロック（3×3、2×2、1×1）に分かれる。GPU と同じく
            既定はブロック対角で解く（block_diagonal=False で完全な 6×6）。
@@ -53,6 +56,7 @@ TABLE_STEPS = 48
 DEGENERATE_HORIZONTAL_SUN = 1e-7               # 太陽が天頂 / 天底: 局所の x が決まらないので m > 0 の項を 0 にする
 DET_FALLBACK = 1e-4                            # ブロックの det(I − F) がこれ未満なら対角だけで閉じる（GPU と同じ）
 DIAGONAL_FLOOR = 1e-3                          # 1 − F_aa の下限
+ZENITH_RAYS = (64, 64)                         # F の天頂角の求積（地面側, 空側）。GPU の kShZenithGround / kShZenithSky
 
 
 # ---------------------------------------------------------------------- 基底
@@ -98,6 +102,59 @@ def sun_grid(n_theta: int = 32, n_phi: int = 32):
         return local @ np.stack([x, np.cross(sun, x), sun]), weight
 
     return make
+
+
+def zenith_nodes(r_km: float, n_ground: int, n_sky: int):
+    """F の天頂角の求積点 z（天頂角の余弦）と重み dz。地平線 z_h = −√(1 − (R/r)²) で分け、z = z_h ∓ (1 ± z_h)·s²
+    （s は中点則）で地平線の近くを細かく刻む（GPU の ShZenithNode、atmosphere_ref.sh_zenith_nodes と同じ）。"""
+
+    zh = -math.sqrt(max(0.0, 1.0 - (ae.BOTTOM_KM / r_km) ** 2))
+    sg = (np.arange(n_ground) + 0.5) / n_ground
+    ss = (np.arange(n_sky) + 0.5) / n_sky
+    z = np.concatenate([zh - (1.0 + zh) * sg * sg, zh + (1.0 - zh) * ss * ss])
+    w = np.concatenate([(1.0 + zh) * 2.0 * sg / n_ground, (1.0 - zh) * 2.0 * ss / n_sky])
+    return z, w
+
+
+def azimuth_products(z: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """(∫Y_a·Y_b dφ (N, 6, 6), ∫Y_a dφ (N, 6))。局所の枠で x = s·cosφ、y = s·sinφ（s² = 1 − z²）とすると、
+    m の違う組は 0、m = 0 は 2π·Y_a·Y_b、m = 1 は π·s²·f_a·f_b（Y = f·x）、m = 2 は π·Y22²·s⁴。"""
+
+    s2 = 1.0 - z * z
+    zero = np.zeros_like(z)
+    # 方位 φ = 0（x = s、y = 0）での値 / 方位の因子: m = 0 は 1、m = 1 は cosφ、m = 2 は cos2φ
+    y = basis(np.sqrt(np.maximum(s2, 0.0)), zero, z)                                  # (N, 6)
+    norm = np.array([2.0 * np.pi, 2.0 * np.pi, np.pi, 2.0 * np.pi, np.pi, np.pi])   # ∫cos²(mφ) dφ
+    same_m = BAND_M[:, None] == BAND_M[None, :]
+    q = np.where(same_m, y[:, :, None] * y[:, None, :] * norm[None, None, :], 0.0)
+    g = np.where(BAND_M == 0, 2.0 * np.pi * y, 0.0)
+    return q, g
+
+
+def transfer_zenith(atmo: ae.Atmosphere, chi: np.ndarray, h_km: float, ground_albedo: float, ground_term: bool,
+                    rays: tuple[int, int] = ZENITH_RAYS, steps: int = TABLE_STEPS) -> np.ndarray:
+    """高度 h の F (3, 6, 6)（ブロック対角）を、天頂角の 1 次元の求積で求める。table_point の F と同じ式。"""
+
+    origin = np.array([0.0, ae.BOTTOM_KM + max(h_km, 0.001), 0.0])
+    z, wz = zenith_nodes(float(origin[1]), *rays)
+    dirs = np.stack([np.sqrt(np.maximum(1.0 - z * z, 0.0)), z, np.zeros_like(z)], axis=-1)
+    t_end, hit = ae.ray_extent(origin, dirs)
+    s = (np.arange(steps) + 0.5) / steps
+    t = t_end[:, None] * s * s
+    dt = t_end[:, None] * 2.0 * s / steps
+    p = origin + t[..., None] * dirs[:, None, :]
+    s_r, s_m, ext = atmo.coefficients(np.linalg.norm(p, axis=-1) - ae.BOTTOM_KM)
+    seg = ext * dt[..., None]
+    view_t = np.exp(-(np.cumsum(seg, axis=1) - 0.5 * seg))
+    total_t = np.exp(-seg.sum(axis=1))
+    A = np.stack([np.einsum("ns,nsc->nc", dt, view_t * sg) for sg in [s_r] + list(s_m)])  # (K, n, 3)
+    B = np.einsum("kbc,knc->nbc", chi[:, BAND_L], A)                                    # (n, 6, 3)
+    q, g0 = azimuth_products(z)
+    F = np.einsum("n,nab,nbc->cab", wz, q, B)
+    if ground_term and ground_albedo > 0.0:
+        g = hit[:, None] * total_t * ground_albedo / np.pi
+        F = F + np.einsum("n,na,nc,b->cab", wz, g0, g, HEMISPHERE_COSINE)
+    return F
 
 
 # ---------------------------------------------------------------------- Legendre のモーメント χ
@@ -234,8 +291,12 @@ def _init_worker(ctx: dict) -> None:
 
 def _table_row(i: int):
     c = _CTX
-    return i, [table_point(c["atmo"], c["tt"], c["chi"], c["h"][i], mu, c["albedo"], c["ground_term"], c["dirset"],
-                           c["steps"]) for mu in c["mu"]]
+    row = [table_point(c["atmo"], c["tt"], c["chi"], c["h"][i], mu, c["albedo"], c["ground_term"], c["dirset"],
+                       c["steps"]) for mu in c["mu"]]
+    if c["transfer"] == "zenith":
+        F = transfer_zenith(c["atmo"], c["chi"], c["h"][i], c["albedo"], c["ground_term"], c["zenith_rays"], c["steps"])
+        row = [(c1, F) for c1, _ in row]
+    return i, row
 
 
 # ---------------------------------------------------------------------- 表
@@ -287,13 +348,15 @@ class ShMultiScatteringTable(_ShSource):
 
     ground_term: 閉じ方の地表の項（案 5）。ground_albedo = 0 なら効かない。
     block_diagonal: F を m ごとのブロックで解く（GPU と同じ）。False なら完全な 6×6。
+    transfer: F の求積。"zenith"（既定、高度ごとに天頂角の 1 次元の求積。ブロック対角）/ "grid"（太陽中心の格子）。
     gathers: 反復（案 6）の回数の差し込み口。今は 0 だけ。
     processes: 表を作るプロセス数（1 なら同じプロセスで作る）。"""
 
     def __init__(self, atmo: ae.Atmosphere, table: ae.TransmittanceTable, size: int = 32, steps: int = TABLE_STEPS,
                  ground_albedo: float = ae.GROUND_ALBEDO_MS, ground_term: bool = True, block_diagonal: bool = True,
                  gathers: int = 0, chi: np.ndarray | None = None, n_theta: int = 32, n_phi: int = 32,
-                 processes: int = 1, raw: tuple[np.ndarray, np.ndarray] | None = None):
+                 processes: int = 1, raw: tuple[np.ndarray, np.ndarray] | None = None, transfer: str = "zenith",
+                 zenith_rays: tuple[int, int] = ZENITH_RAYS):
         if gathers != 0:
             # [POINT] 反復を足すときは、c_{n+1}(x) = ∫ T·Σ_k σs,k·J_n(y) dt + 地表 T·ρ/π·E_n(g) を、この表（前の次数）を
             #         光線上の点 y と地表の点 g で引いて求め、最後の次数を (I − F)⁻¹ の代わりに F(I − F)⁻¹ で閉じる
@@ -305,9 +368,11 @@ class ShMultiScatteringTable(_ShSource):
         self.ground_albedo = ground_albedo
         self.ground_term = ground_term
         self.block_diagonal = block_diagonal
+        self.transfer = transfer
         if raw is None:
             ctx = dict(atmo=atmo, tt=table, chi=self.chi, h=self.h, mu=self.mu, albedo=ground_albedo,
-                       ground_term=ground_term, n_theta=n_theta, n_phi=n_phi, steps=steps)
+                       ground_term=ground_term, n_theta=n_theta, n_phi=n_phi, steps=steps, transfer=transfer,
+                       zenith_rays=zenith_rays)
             if processes > 1:
                 with Pool(processes, initializer=_init_worker, initargs=(ctx,)) as pool:
                     rows = pool.map(_table_row, range(size), chunksize=1)

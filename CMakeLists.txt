@@ -84,6 +84,10 @@ foreach(pass SkyRaymarch MultiScatteringLut SkyViewLut AerialPerspective)
   compile_shader(atmosphere/${pass}.hlsl CSMain cs_6_6 ${pass}_sh_cs -D MS_SH=1)
   compile_shader(atmosphere/${pass}.hlsl CSMain cs_6_6 ${pass}_mie_sh_cs -D MIE_GENERAL=1 -D MS_SH=1)
 endforeach()
+# SH の Multi-scattering LUT の F の表（行 = 高度、天頂角の 1 次元の求積）。係数のパスより先に回す
+compile_shader(atmosphere/MultiScatteringLut.hlsl CSTransfer cs_6_6 MultiScatteringShTransfer_sh_cs -D MS_SH=1)
+compile_shader(atmosphere/MultiScatteringLut.hlsl CSTransfer cs_6_6 MultiScatteringShTransfer_mie_sh_cs
+               -D MIE_GENERAL=1 -D MS_SH=1)
 compile_shader(scene/Mesh.hlsl VSMain vs_6_6 Mesh_vs)
 compile_shader(scene/Mesh.hlsl PSMain ps_6_6 Mesh_ps)
 

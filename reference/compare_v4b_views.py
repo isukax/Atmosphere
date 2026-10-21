@@ -188,6 +188,8 @@ def main() -> int:
     parser.add_argument("--medium-from-dump", type=Path, help="媒質を書き出さず、この表の媒質（.bin）から大気を作る")
     parser.add_argument("--results", type=Path, help="report.json と画像の出力先（既定は --out。画像は --out が既定なら docs/images）")
     parser.add_argument("--processes", type=int, default=14, help="sh の表を作るプロセス数")
+    parser.add_argument("--sh-transfer", choices=("zenith", "grid"), default="zenith",
+                        help="sh の F の求積（zenith = 天頂角の 1 次元、grid = 太陽中心の格子。ms_sh.py）")
     args = parser.parse_args()
     if "gpu_sh" in args.variants and args.gpu_ms is None:
         parser.error("gpu_sh needs --gpu-ms")
@@ -212,7 +214,7 @@ def main() -> int:
             psis[variant] = Option1MultiScatteringTable(atmo, table, ground_albedo=GROUND_ALBEDO)
         elif variant == "sh":
             psis[variant] = ms_sh.ShMultiScatteringTable(atmo, table, ground_albedo=GROUND_ALBEDO, ground_term=True,
-                                                         processes=args.processes)
+                                                         processes=args.processes, transfer=args.sh_transfer)
         else:
             psis[variant] = ms_sh.GpuShMultiScatteringTable(args.gpu_ms, ms_sh.medium_moments(atmo))
     sky_es = {k: GroundSkyIrradiance(atmo, table, psi) for k, psi in psis.items()}

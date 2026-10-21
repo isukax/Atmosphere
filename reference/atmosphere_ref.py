@@ -15,6 +15,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+SH_ZENITH_RAYS = (64, 64)  # F の天頂角の求積の光線（地面側, 空側）。シェーダーの kShZenithGround / kShZenithSky
+
 
 @dataclass(frozen=True)
 class Atmosphere:
@@ -261,12 +263,17 @@ class Atmosphere:
         return second_order / (1.0 - fms)  # Ψ_ms = L₂ / (1 − f_ms)
 
     def multiple_scattering_sh(self, r_km: float, mu_sun: float, ground_albedo, moments: np.ndarray,
-                               outer_panels: int = 32, inner_panels: int = 8, order: int = 4) -> np.ndarray:
+                               outer_panels: int = 32, inner_panels: int = 8, order: int = 4,
+                               transfer: str = "zenith", zenith_rays: tuple[int, int] = SH_ZENITH_RAYS) -> np.ndarray:
         """多重散乱の SH 近似の係数 c_b（6, C）（design.md §5.11。シェーダーの MultiScatteringLut.hlsl の MS_SH の版と
         同じ方向・同じ式）。moments: Mie の成分ごとの χ_0〜χ_2、形状 (成分, 3, C)。Rayleigh は (1, 0, 0.1)。
 
           c₁ = Σ w·Y_b·L₁（L₁ = 実際の位相関数の単散乱 + 地表での直達光の反射）
-          F_ab = Σ w·Y_a·Y_b·Ã_{l(b)} + (ρ/π)·G_a·e_b（m ごとのブロック）、c = (I − F)⁻¹·c₁"""
+          F_ab = Σ w·Y_a·Y_b·Ã_{l(b)} + (ρ/π)·G_a·e_b（m ごとのブロック）、c = (I − F)⁻¹·c₁
+
+        transfer: F の求積。"zenith" = 天頂角の 1 次元の求積（方位は解析的に積分、地平線で分ける。zenith_rays =
+        (地面側, 空側) の光線の数。シェーダーの CSTransfer と同じ）、"grid" = c₁ と同じ太陽中心の 1,024 方向（Phase 4.11
+        の最初の版）。"""
 
         dirs, weights = sh_sun_grid(mu_sun)
         origin = np.array([0.0, r_km, 0.0])
@@ -277,22 +284,32 @@ class Atmosphere:
         # SH の枠: z = +Y、x = +X、y = −Z（基底は y² だけ）
         basis = sh_basis6(dirs[:, 0], dirs[:, 1], dirs[:, 2] ** 2)                 # (N, 6)
         n_ch = lum.shape[1]
+        c1 = np.einsum("n,nb,nc->bc", weights, basis, lum)
+        if transfer == "zenith":
+            # [POINT] F は μs によらない（Ã は光線の天頂角だけで決まる）。方位の積分 ∫Y_a·Y_b dφ を解析的に済ませ、
+            #         天頂角だけで積む（太陽中心の格子は地平線付近の長い光線を μs ごとに違う刻みで拾い、F がばらつく）
+            z, wz = sh_zenith_nodes(r_km, self.bottom_radius_km, *zenith_rays)
+            zdirs = np.stack([np.sqrt(np.maximum(1.0 - z * z, 0.0)), z, np.zeros_like(z)], axis=-1)
+            _, _, extra = self.scattering_integrals(origin, zdirs, np.array([0.0, 1.0, 0.0]), outer_panels=outer_panels,
+                                                    inner_panels=1, order=order, components=True)
+            fw, products, ground_basis = wz, sh_azimuth_products(z), sh_azimuth_ground(z)
+        else:
+            fw, products, ground_basis = weights, basis[:, :, None] * basis[:, None, :], basis
         moments = np.asarray(moments, dtype=np.float64).reshape(-1, 3, n_ch)
         rayleigh_chi = np.array([1.0, 0.0, 0.1])
         a_k = extra["as1"]                                                          # (N, K, C)
         band_as1 = rayleigh_chi[None, :, None] * a_k[:, 0, None, :]                # (N, 3, C)
         for k in range(1, a_k.shape[1]):
             band_as1 = band_as1 + moments[k - 1][None] * a_k[:, k, None, :]
-        c1 = np.einsum("n,nb,nc->bc", weights, basis, lum)
         tg = np.where(extra["hit_ground"][:, None], extra["ground_transmittance"], 0.0)
         albedo = np.broadcast_to(np.asarray(ground_albedo, dtype=np.float64), (n_ch,))
         coeffs = np.zeros((6, n_ch))
         for block in SH_BLOCKS:
             idx = np.array(block)
             bands = SH_BANDS[idx]
-            f = np.einsum("n,na,nb,nbc->cab", weights, basis[:, idx], basis[:, idx], band_as1[:, bands, :])
+            f = np.einsum("n,nab,nbc->cab", fw, products[:, idx][:, :, idx], band_as1[:, bands, :])
             if 0 in block:
-                g = np.einsum("n,na,nc->ca", weights, basis[:, idx], tg)               # (C, 3)
+                g = np.einsum("n,na,nc->ca", fw, ground_basis[:, idx], tg)            # (C, 3)
                 f = f + (albedo / np.pi)[:, None, None] * g[:, :, None] * SH_HEMISPHERE_COSINE[idx][None, None, :]
             a = np.eye(idx.size)[None] - f
             coeffs[idx] = np.linalg.solve(a, c1[idx].T[..., None])[..., 0].T
@@ -472,6 +489,48 @@ def sh_sun_grid(mu_sun: float, n_theta: int = 32, n_phi: int = 32):
 
 
 # ---------------------------------------------------------------------- 補助関数
+
+def sh_zenith_nodes(r_km: float, bottom_km: float, n_ground: int, n_sky: int):
+    """F の天頂角の求積点（z = 天頂角の余弦）と重み dz（和 = 2）。地平線 z_h = −√(1 − (R/r)²) で地面側と空側に分け、
+    それぞれ z = z_h ∓ (1 ± z_h)·s²（s は中点則）で地平線の近くを細かく刻む（地平線で Ã が不連続、近くで急に変わる）。
+    シェーダーの ShZenithNode と同じ。"""
+
+    zh = -np.sqrt(max(0.0, 1.0 - (bottom_km / r_km) ** 2))
+    sg = (np.arange(n_ground) + 0.5) / n_ground
+    ss = (np.arange(n_sky) + 0.5) / n_sky
+    z = np.concatenate([zh - (1.0 + zh) * sg * sg, zh + (1.0 - zh) * ss * ss])
+    w = np.concatenate([(1.0 + zh) * 2.0 * sg / n_ground, (1.0 - zh) * 2.0 * ss / n_sky])
+    return z, w
+
+
+def sh_azimuth_products(z: np.ndarray) -> np.ndarray:
+    """∫_0^{2π} Y_a·Y_b dφ（天頂角の余弦 z の関数、形状 (N, 6, 6)、m ごとのブロック対角）。x = s·cosφ、y = s·sinφ、
+    s² = 1 − z² として、m = 0 は 2π·Y_a·Y_b、m = 1 は π·s²·f_a·f_b（f = Y1, Y21·z）、m = 2 は π·Y22²·s⁴。"""
+
+    s2 = 1.0 - z * z
+    q = np.zeros(z.shape + (6, 6))
+    f0 = np.stack([np.full(z.shape, 0.28209479177387814), 0.4886025119029199 * z,
+                   0.31539156525252005 * (3.0 * z * z - 1.0)], axis=-1)
+    f1 = np.stack([np.full(z.shape, 0.4886025119029199), 1.0925484305920792 * z], axis=-1)
+    for i, a in enumerate((0, 1, 3)):
+        for j, b in enumerate((0, 1, 3)):
+            q[:, a, b] = 2.0 * np.pi * f0[:, i] * f0[:, j]
+    for i, a in enumerate((2, 4)):
+        for j, b in enumerate((2, 4)):
+            q[:, a, b] = np.pi * s2 * f1[:, i] * f1[:, j]
+    q[:, 5, 5] = np.pi * 0.5462742152960396 ** 2 * s2 * s2
+    return q
+
+
+def sh_azimuth_ground(z: np.ndarray) -> np.ndarray:
+    """∫_0^{2π} Y_a dφ（形状 (N, 6)）。m = 0 だけ 2π·Y_a、m > 0 は 0（地表の項 G_a 用）"""
+
+    g = np.zeros(z.shape + (6,))
+    g[:, 0] = 2.0 * np.pi * 0.28209479177387814
+    g[:, 1] = 2.0 * np.pi * 0.4886025119029199 * z
+    g[:, 3] = 2.0 * np.pi * 0.31539156525252005 * (3.0 * z * z - 1.0)
+    return g
+
 
 def segment_edges(start: np.ndarray, end: np.ndarray, breakpoints: np.ndarray, panels_per_segment: int) -> np.ndarray:
     """[start, end] を breakpoints（NaN は無視）で区切り、各区間を panels_per_segment 等分した端点、

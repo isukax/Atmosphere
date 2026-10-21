@@ -46,6 +46,8 @@ const nlohmann::json kShLayout = {
     {"coefficients_lm", {{0, 0}, {1, 0}, {1, 1}, {2, 0}, {2, 1}, {2, 2}}},
     {"basis", "real SH, cos(m phi) terms only, no Condon-Shortley phase; local frame z = zenith, x = sun azimuth"},
     {"units", "SH coefficients of the incoming scattered radiance per illuminance [sr^-1]"},
+    // F（閉じ方の伝達行列）の求積: 行（高度）ごとに天頂角の 1 次元の求積（地面側, 空側の光線の数）。c₁ は太陽中心の格子
+    {"transfer", {{"method", "zenith"}, {"rays", {64, 64}}}},
 };
 
 /// 検証する組（design.md §5.11）。albedo < 0 なら既定（0.3）、aod550 > 0 なら AOD の上書き、g > 0 なら

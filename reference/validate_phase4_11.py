@@ -6,10 +6,11 @@
   chi:     位相関数の Legendre のモーメント（サイドカー = C++ の PhaseMoments）vs Python（atmosphere_ref の
            legendre_moments。別の積分）。相対差 < 1e-5。
   V3j-SH:  SH の Multi-scattering LUT（入れ子 256 区間・視線 256 区間・等間隔）vs 倍精度（atmosphere_ref の
-           multiple_scattering_sh、同じ 1,024 方向・同じブロックの解法）。係数ごとに |Δc_b| / |c00| < 1%
+           multiple_scattering_sh、同じ 1,024 方向・同じ F の求積（サイドカーの layout.transfer）・同じブロックの解法）。係数ごとに |Δc_b| / |c00| < 1%
            （|c00| はテクセルの値。夜側で 0 に近い所は全体の最大の 1e-6 を下限にする）。
   MSsh:    既定の設定（40 区間・2 次配置・Transmittance LUT）と検証用の差、閉じ方の行列式の最小、F_00 の行内の
-           ばらつき（F は μs によらないはずなので、方向の格子の求積の誤差の目安）。記録。
+           ばらつき（F は μs によらないはずなので、方向の格子の求積の誤差の目安）。記録。F を行ごとの表（天頂角の
+           1 次元の求積）にしてからは 0（太陽中心の格子で積んでいた最初の版は 11〜36%、dumps/phase4_11_grid）。
   V3k-SH:  全天（128×64）で、GPU の SH のレイマーチ vs 同じ SH の LUT を差し込んだ Python の描画（aerosol_experiment の
            integrate + ms_sh.GpuShMultiScatteringTable）。ΔE_ITP の平均 < 0.5（§5.9 の V3k と同じ）。これで描画側（局所の枠・
            基底の符号・χ・アトラスのタイル）を LUT と切り分けて確かめる。LUT 描画 vs レイマーチ、SH vs 等方の LUT 描画は記録。
@@ -100,11 +101,20 @@ def check_chi(out: Path) -> list[dict]:
 
 
 # ---------------------------------------------------------------------- V3j-SH
+def transfer_method(meta: dict) -> tuple[str, tuple[int, int]]:
+    """GPU の F の求積（サイドカーの layout.transfer。ない古いダンプは太陽中心の格子）"""
+
+    t = meta.get("layout", {}).get("transfer", {})
+    return t.get("method", "grid"), tuple(t.get("rays", (64, 64)))
+
+
 def _reference_texel(args):
     meta, r_km, mu_sun, panels = args
     atmo, moments = atmosphere_and_moments(meta)
     albedo = np.asarray(meta["atmosphere"]["ground_albedo"], dtype=np.float64)
-    return atmo.multiple_scattering_sh(r_km, mu_sun, albedo, moments, outer_panels=panels[0], inner_panels=panels[1])
+    method, rays = transfer_method(meta)
+    return atmo.multiple_scattering_sh(r_km, mu_sun, albedo, moments, outer_panels=panels[0], inner_panels=panels[1],
+                                       transfer=method, zenith_rays=rays)
 
 
 def check_v3j_sh(out: Path, workers: int) -> list[dict]:

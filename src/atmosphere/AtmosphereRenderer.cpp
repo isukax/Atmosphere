@@ -33,6 +33,9 @@ struct MultiScatteringLutConstants {
     uint32_t uniformSteps;              // c12.z
     uint32_t rowOffset;                 // c12.w SH の版: このディスパッチの最初の行
     float phaseMoments[6][4];           // c13-c18 SH の版: Mie の成分 0・1 の χ_0〜χ_2（RGB）
+    uint32_t transferUav;               // c19.x SH の版: F の表（CSTransfer が書く）
+    uint32_t transferSrv;               // c19.y SH の版: F の表（CSMain が読む）
+    uint32_t pad[2];
 };
 static_assert(offsetof(MultiScatteringLutConstants, outputUav) == 10 * 16);
 static_assert(offsetof(MultiScatteringLutConstants, transmittanceLutSrv) == 11 * 16);
@@ -40,7 +43,8 @@ static_assert(offsetof(MultiScatteringLutConstants, transmittanceLutSize) == 12 
 static_assert(offsetof(MultiScatteringLutConstants, uniformSteps) == 12 * 16 + 8);
 static_assert(offsetof(MultiScatteringLutConstants, rowOffset) == 12 * 16 + 12);
 static_assert(offsetof(MultiScatteringLutConstants, phaseMoments) == 13 * 16);
-static_assert(sizeof(MultiScatteringLutConstants) == 19 * 16);
+static_assert(offsetof(MultiScatteringLutConstants, transferUav) == 19 * 16);
+static_assert(sizeof(MultiScatteringLutConstants) == 20 * 16);
 
 void store(float (&dst)[3], const glm::vec3& v)
 {
@@ -85,12 +89,17 @@ AtmosphereRenderer::AtmosphereRenderer(gfx::Device& device, const gfx::PipelineL
       m_raymarchPso(pipelines, "SkyRaymarch", true),
       m_aerialPerspectivePso(pipelines, "AerialPerspective", true),
       m_skyIrradiancePso(pipelines, "SkyIrradiance"),
+      m_multiScatteringShTransferPso(pipelines.createCompute("MultiScatteringShTransfer_sh_cs")),
+      m_multiScatteringShTransferMiePso(pipelines.createCompute("MultiScatteringShTransfer_mie_sh_cs")),
       m_transmittanceLut(device, {kTransmittanceWidth, kTransmittanceHeight, lutFormat, true, true, false,
                                   L"TransmittanceLut"}),
       m_multiScatteringLut(device, {kMultiScatteringSize, kMultiScatteringSize, lutFormat, true, true, false,
                                     L"MultiScatteringLut"}),
       m_multiScatteringShLut(device, {kMultiScatteringSize * kMultiScatteringShCoefficients, kMultiScatteringSize,
                                       lutFormat, true, true, false, L"MultiScatteringShLut"}),
+      m_multiScatteringShTransfer(device, {kMultiScatteringShTransferCount, kMultiScatteringSize,
+                                           DXGI_FORMAT_R32G32B32A32_FLOAT, true, true, false,
+                                           L"MultiScatteringShTransfer"}),
       m_skyViewLut(device, {kSkyViewWidth, kSkyViewHeight, lutFormat, true, true, false, L"SkyViewLut"}),
       m_skyViewMieLut(device, {kSkyViewWidth, kSkyViewHeight, lutFormat, true, true, false, L"SkyViewMieLut"}),
       m_skyViewMie1Lut(device, {kSkyViewWidth, kSkyViewHeight, lutFormat, true, true, false, L"SkyViewMie1Lut"}),
@@ -176,12 +185,23 @@ bool AtmosphereRenderer::updateMultiScatteringLut(ID3D12GraphicsCommandList* cmd
     c.uniformSteps = uniformSteps ? 1u : 0u;
     c.rowOffset = 0;
     storeMoments(c.phaseMoments, mieLegendreMoments(params));
+    c.transferUav = m_multiScatteringShTransfer.uavIndex();
+    c.transferSrv = m_multiScatteringShTransfer.srvIndex();
 
-    output.transition(cmd, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     cmd->SetComputeRootSignature(m_pipelines.rootSignature());
+    if (sh) {
+        // [POINT] F は μs によらないので、先に行（高度）ごとの表を作る（1 グループ = 1 行、天頂角の 128 本）
+        m_multiScatteringShTransfer.transition(cmd, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        cmd->SetPipelineState(usesGeneralMieMedium(params) ? m_multiScatteringShTransferMiePso.Get()
+                                                           : m_multiScatteringShTransferPso.Get());
+        cmd->SetComputeRootConstantBufferView(gfx::PipelineLibrary::kRootPassConstants, upload.push(c));
+        cmd->Dispatch(kMultiScatteringSize, 1, 1);
+        m_multiScatteringShTransfer.transition(cmd, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
+    }
+    output.transition(cmd, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     cmd->SetPipelineState(m_multiScatteringPso.get(params, model));
     if (sh && sunMode == SunTransmittanceMode::Nested) {
-        // [POINT] SH の版は 1 テクセルあたり 1,024 方向（等方の版の 16 倍）。検証用の入れ子の設定では 1 回の
+        // [POINT] SH の版は 1 テクセルあたり 512 方向（等方の版の 8 倍）。検証用の入れ子の設定では 1 回の
         //         ディスパッチが数秒になり、GPU のタイムアウト（TDR）に掛かりうるので、行（高度）ごとに分ける
         for (uint32_t row = 0; row < kMultiScatteringSize; ++row) {
             c.rowOffset = row;
@@ -190,7 +210,7 @@ bool AtmosphereRenderer::updateMultiScatteringLut(ID3D12GraphicsCommandList* cmd
         }
     } else {
         cmd->SetComputeRootConstantBufferView(gfx::PipelineLibrary::kRootPassConstants, upload.push(c));
-        // 1 テクセル = 1 スレッドグループ（等方の版: 64 スレッド = 64 方向。SH の版: 64 スレッド × 16 方向）
+        // 1 テクセル = 1 スレッドグループ（等方の版: 64 スレッド = 64 方向。SH の版: 128 スレッド × 4 方向。その前に F の表）
         cmd->Dispatch(kMultiScatteringSize, kMultiScatteringSize, 1);
     }
     output.transition(cmd, D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);

@@ -133,6 +133,7 @@ public:
     static constexpr uint32_t kTransmittanceHeight = 64;
     static constexpr uint32_t kMultiScatteringSize = 32;
     static constexpr uint32_t kMultiScatteringShCoefficients = 6;  // l ≤ 2 の鏡映対称の球面調和（design.md §5.11）
+    static constexpr uint32_t kMultiScatteringShTransferCount = 17;  // F の表の 1 行（F の 3 つのブロック + 地表の G）
     static constexpr uint32_t kSkyViewWidth = 192;
     static constexpr uint32_t kSkyViewHeight = 108;
     static constexpr uint32_t kAerialPerspectiveSize = 32;   // 32×32×32
@@ -218,9 +219,13 @@ private:
     MediumPso m_raymarchPso;
     MediumPso m_aerialPerspectivePso;
     MediumPso m_skyIrradiancePso;
+    // SH の Multi-scattering LUT の F の表（MultiScatteringLut.hlsl の CSTransfer）。1 成分・背景なし / 一般形
+    ComPtr<ID3D12PipelineState> m_multiScatteringShTransferPso;
+    ComPtr<ID3D12PipelineState> m_multiScatteringShTransferMiePso;
     gfx::Texture m_transmittanceLut;
     gfx::Texture m_multiScatteringLut;
     gfx::Texture m_multiScatteringShLut;  // SH の係数のアトラス（MultiScatteringModel::ShL2Ground）
+    gfx::Texture m_multiScatteringShTransfer;  // SH の版の F の表（17×32、行 = 高度。CSTransfer → CSMain）
     gfx::Texture m_skyViewLut;     // Rayleigh の単散乱 + 多重散乱 [sr⁻¹]
     gfx::Texture m_skyViewMieLut;  // Mie の単散乱（位相関数なし）[無次元]
     gfx::Texture m_skyViewMie1Lut; // Mie の成分 1 の同じ量（2 成分のプリセットだけ書く。design.md §5.9）
