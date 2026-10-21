@@ -1,0 +1,9 @@
+{
+  "name": "atmosphere-compact",
+  "version-string": "0.1.0",
+  "dependencies": ["glm"],
+  "features": {
+    "sample": {"description":"Standalone display and UI", "dependencies":[{"name":"imgui","features":["dx12-binding","win32-binding"]}]},
+    "compare": {"description":"Repository-only comparison tools", "dependencies":["nlohmann-json"]}
+  }
+}

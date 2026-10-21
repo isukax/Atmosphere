@@ -1,0 +1,35 @@
+{
+  "date": "2026-10-21",
+  "gpu": "AMD Radeon RX 7800 XT",
+  "comparison": {
+    "cases": 46,
+    "passed": 506,
+    "checks": 506,
+    "fp32": {
+      "max_nrmse": 1.5707533686567236e-05,
+      "max_normalized_absolute_error": 0.0004237154229207534
+    },
+    "fp16": {
+      "max_nrmse": 5.3631797257237396e-05,
+      "max_normalized_absolute_error": 0.0009541984732824427
+    }
+  },
+  "original_regression": {
+    "exr_files": 989,
+    "max_relative_difference": 0
+  },
+  "source_lines": {
+    "original_cpp": 1621,
+    "compact_cpp": 559,
+    "original_hlsl": 2585,
+    "compact_hlsl": 1188
+  },
+  "atmosphere_shader_variants": {
+    "original": 26,
+    "compact": 7
+  },
+  "renderer_textures": {
+    "original": 12,
+    "compact": 8
+  }
+}
